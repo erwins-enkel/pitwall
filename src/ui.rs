@@ -85,11 +85,9 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(table, area);
 }
 
-fn render_empty_state(frame: &mut Frame, area: Rect, view: &View) {
-    let message = view
-        .status
-        .clone()
-        .unwrap_or_else(|| "waiting for runners\u{2026}".to_string());
+fn render_empty_state(frame: &mut Frame, area: Rect) {
+    // Errors are already surfaced in the banner above; avoid showing them twice.
+    let message = "waiting for runners\u{2026}".to_string();
     let chunks = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -142,7 +140,7 @@ pub fn render(frame: &mut Frame, view: &View) {
     let body_area = chunks[idx];
     idx += 1;
     if view.rows.is_empty() {
-        render_empty_state(frame, body_area, view);
+        render_empty_state(frame, body_area);
     } else {
         render_table(frame, body_area, view);
     }

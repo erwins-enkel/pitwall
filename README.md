@@ -34,6 +34,7 @@ Manual alternative:
 
 ```sh
 cargo build --release
+mkdir -p ~/.local/bin
 cp target/release/pitwall ~/.local/bin/pitwall
 ```
 

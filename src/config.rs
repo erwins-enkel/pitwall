@@ -40,6 +40,7 @@ mod tests {
         // Defaults hold when env is unset in the test process.
         std::env::remove_var("PITWALL_SLICE_CAP_GIB");
         std::env::remove_var("PITWALL_REPO");
+        std::env::remove_var("PITWALL_PREFIX");
         let c = Config::from_env();
         assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
         assert_eq!(c.repo, "erwins-enkel/pulse");
