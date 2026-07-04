@@ -111,7 +111,12 @@ async fn collect(
         if let Ok(Some(stat)) = d
             .stats(
                 &id,
-                Some(StatsOptionsBuilder::default().stream(false).build()),
+                Some(
+                    StatsOptionsBuilder::default()
+                        .stream(false)
+                        .one_shot(true)
+                        .build(),
+                ),
             )
             .try_next()
             .await
