@@ -6,12 +6,27 @@ pub struct Config {
     pub slice_cap_bytes: u64,
 }
 
+/// Extract a unix socket path from a `DOCKER_HOST` value. Returns `None` for
+/// non-unix schemes (`tcp://`, `ssh://`, `http(s)://`, …) which this
+/// rootless-docker tool cannot use over a unix socket — the caller then falls
+/// back to the default `/run/user/$UID/docker.sock`.
+fn unix_socket_from_docker_host(h: &str) -> Option<String> {
+    if let Some(path) = h.strip_prefix("unix://") {
+        Some(path.to_string())
+    } else if h.starts_with('/') {
+        // A bare absolute path is a unix socket path.
+        Some(h.to_string())
+    } else {
+        None
+    }
+}
+
 impl Config {
     pub fn from_env() -> Config {
         let socket_path = std::env::var("PITWALL_SOCKET").ok().unwrap_or_else(|| {
             std::env::var("DOCKER_HOST")
                 .ok()
-                .map(|h| h.trim_start_matches("unix://").to_string())
+                .and_then(|h| unix_socket_from_docker_host(&h))
                 .unwrap_or_else(|| {
                     let uid = unsafe { libc::getuid() };
                     format!("/run/user/{uid}/docker.sock")
@@ -56,5 +71,20 @@ mod tests {
             Config::from_env().socket_path,
             format!("/run/user/{uid}/docker.sock")
         );
+    }
+
+    #[test]
+    fn docker_host_unix_paths_parsed_non_unix_ignored() {
+        assert_eq!(
+            unix_socket_from_docker_host("unix:///run/user/1000/docker.sock").as_deref(),
+            Some("/run/user/1000/docker.sock")
+        );
+        assert_eq!(
+            unix_socket_from_docker_host("/var/run/docker.sock").as_deref(),
+            Some("/var/run/docker.sock")
+        );
+        // Non-unix schemes are unusable over a unix socket → None (caller uses default).
+        assert_eq!(unix_socket_from_docker_host("tcp://host:2375"), None);
+        assert_eq!(unix_socket_from_docker_host("ssh://user@host"), None);
     }
 }
