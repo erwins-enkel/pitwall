@@ -12,6 +12,10 @@ mod stats_math;
 #[allow(dead_code)]
 mod resource;
 
+// `jobs::run` has no caller until Task 7 wires it into the event loop.
+#[allow(dead_code)]
+mod jobs;
+
 fn main() {
     println!("pitwall");
 }
