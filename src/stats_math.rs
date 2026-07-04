@@ -11,6 +11,16 @@ pub fn mem_used(usage: u64, inactive_file: u64) -> u64 {
     usage.saturating_sub(inactive_file)
 }
 
+/// CPU% for a cgroup v2 runner from `cpu.stat`'s `usage_usec` delta over a
+/// wall-clock interval. Matches the docker convention where 100% = one full
+/// core (so a 4-core job can read 400%).
+pub fn cgroup_cpu_pct(delta_usage_usec: u64, delta_wall_usec: u64) -> f64 {
+    if delta_wall_usec == 0 {
+        return 0.0;
+    }
+    delta_usage_usec as f64 / delta_wall_usec as f64 * 100.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +47,18 @@ mod tests {
     fn mem_subtracts_inactive_file() {
         assert_eq!(mem_used(1000, 400), 600);
         assert_eq!(mem_used(300, 400), 0);
+    }
+
+    #[test]
+    fn cgroup_cpu_one_core_over_interval_is_100pct() {
+        // 1s of CPU time over a 1s wall interval = one full core = 100%.
+        assert!((cgroup_cpu_pct(1_000_000, 1_000_000) - 100.0).abs() < 0.001);
+        // 2 cores' worth over the same interval = 200%.
+        assert!((cgroup_cpu_pct(2_000_000, 1_000_000) - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cgroup_cpu_zero_wall_delta_is_zero() {
+        assert_eq!(cgroup_cpu_pct(500, 0), 0.0);
     }
 }
