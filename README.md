@@ -6,11 +6,15 @@ btop-like terminal UI for self-hosted GitHub Actions runners: live CPU/mem per r
 
 A table, one row per runner:
 
-| runner | cpu | mem | workflow › job | elapsed |
-|---|---|---|---|---|
+| runner | cpu | ~cpu | mem | ~mem | workflow › job | elapsed |
+|---|---|---|---|---|---|---|
 
 - **runner** — container name, e.g. `ci-runner-1`.
 - **cpu / mem** — live usage from rootless docker (mem shown as `used/limit`).
+- **~cpu / ~mem** — block-char sparklines of the last ~40s (20 samples at the 2s
+  poll). CPU auto-scales to its window max with a 10% floor, so idle jitter reads
+  as a flat baseline; mem scales to the container limit. History is in-memory and
+  resets on restart.
 - **workflow › job** — `— idle` when no in-progress job is joined, else `Workflow Name › Job Name`.
 - **elapsed** — ticking duration since the job started; `-` when idle.
 

@@ -9,6 +9,14 @@ const KIB: f64 = 1024.0;
 const MIB: f64 = KIB * 1024.0;
 const GIB: f64 = MIB * 1024.0;
 
+const SPARK_WIDTH: usize = 20;
+const BLOCKS: [char; 8] = [
+    '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
+];
+/// CPU spark auto-scales to its window max but never below this, so idle jitter
+/// (0.1–0.3%) reads as a flat baseline rather than amplified noise.
+const CPU_SPARK_FLOOR: f64 = 10.0;
+
 pub struct View<'a> {
     pub rows: &'a [RunnerRow],
     pub slice_cap_bytes: u64,
@@ -37,6 +45,27 @@ pub fn fmt_elapsed(secs: u64) -> String {
     }
 }
 
+/// Renders `values` (oldest→newest) as block-char sparkline glyphs scaled
+/// against `max`, right-aligned within `width` (left-padded with spaces). A
+/// non-positive `max` renders all values at the lowest level.
+fn spark(values: &[f64], max: f64, width: usize) -> String {
+    let start = values.len().saturating_sub(width);
+    let shown = &values[start..];
+    let mut s = String::with_capacity(width * 3);
+    for _ in 0..width.saturating_sub(shown.len()) {
+        s.push(' ');
+    }
+    for &v in shown {
+        let level = if max > 0.0 {
+            ((v / max).clamp(0.0, 1.0) * (BLOCKS.len() - 1) as f64).round() as usize
+        } else {
+            0
+        };
+        s.push(BLOCKS[level]);
+    }
+    s
+}
+
 fn load_style(load: Load) -> Style {
     match load {
         Load::Idle => Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
@@ -47,7 +76,17 @@ fn load_style(load: Load) -> Style {
 
 fn table_row(row: &RunnerRow, now: SystemTime) -> Row<'static> {
     let cpu = format!("{:.1}%", row.cpu_pct);
+    // CPU has no per-runner cap in the model, so scale to the window max with a
+    // floor. Mem is already a 0..1 fraction of the limit, so scale to 1.0.
+    let cpu_max = row
+        .cpu_hist
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .max(CPU_SPARK_FLOOR);
+    let cpu_spark = spark(&row.cpu_hist, cpu_max, SPARK_WIDTH);
     let mem = format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit));
+    let mem_spark = spark(&row.mem_hist, 1.0, SPARK_WIDTH);
     let (job, branch, elapsed) = match &row.job {
         Some(j) => {
             let branch = if j.branch.is_empty() {
@@ -70,7 +109,9 @@ fn table_row(row: &RunnerRow, now: SystemTime) -> Row<'static> {
     Row::new(vec![
         Cell::from(row.name.clone()),
         Cell::from(cpu),
+        Cell::from(cpu_spark),
         Cell::from(mem),
+        Cell::from(mem_spark),
         Cell::from(job),
         Cell::from(branch),
         Cell::from(elapsed),
@@ -82,7 +123,9 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     let header = Row::new(vec![
         "runner",
         "cpu",
+        "~cpu",
         "mem",
+        "~mem",
         "workflow \u{203a} job",
         "branch",
         "elapsed",
@@ -94,7 +137,9 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     let widths = [
         Constraint::Length(14),
         Constraint::Length(6),
+        Constraint::Length(SPARK_WIDTH as u16),
         Constraint::Length(16),
+        Constraint::Length(SPARK_WIDTH as u16),
         Constraint::Min(12),
         Constraint::Min(8),
         Constraint::Length(10),
@@ -176,6 +221,21 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
+    fn spark_maps_levels_and_pads() {
+        // 0 → lowest block, max → highest block.
+        assert_eq!(spark(&[0.0], 100.0, 1), "\u{2581}");
+        assert_eq!(spark(&[100.0], 100.0, 1), "\u{2588}");
+        // Left-padded with spaces to width, newest right-aligned.
+        assert_eq!(spark(&[100.0], 100.0, 3), "  \u{2588}");
+        // Empty input → all spaces.
+        assert_eq!(spark(&[], 1.0, 3), "   ");
+        // Non-positive max → all lowest (no divide/amplify).
+        assert_eq!(spark(&[5.0, 3.0], 0.0, 2), "\u{2581}\u{2581}");
+        // Over-width input keeps the most recent `width` samples.
+        assert_eq!(spark(&[0.0, 100.0], 100.0, 1), "\u{2588}");
+    }
+
+    #[test]
     fn formats_mem_and_elapsed() {
         assert_eq!(fmt_mem(1024 * 1024 * 1024), "1.0GiB");
         assert_eq!(fmt_mem(1024 * 1024 * 1024 - 1), "1.0GiB"); // boundary: don't print 1024.0MiB
@@ -194,6 +254,8 @@ mod tests {
                 mem_limit: 8 * 1024 * 1024 * 1024,
                 job: None,
                 load: Load::Idle,
+                cpu_hist: vec![],
+                mem_hist: vec![],
             },
             RunnerRow {
                 name: "ci-runner-2".into(),
@@ -207,11 +269,13 @@ mod tests {
                     started_at: SystemTime::now(),
                 }),
                 load: Load::Busy,
+                cpu_hist: vec![],
+                mem_hist: vec![],
             },
         ];
-        // Standard 80-col terminal: the flexible job/branch columns keep all
-        // six columns visible instead of dropping off the right edge.
-        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        // 140 wide: the two 20-wide spark columns plus the flexible job/branch
+        // columns need the extra room to keep every column visible for the asserts.
+        let mut term = Terminal::new(TestBackend::new(140, 12)).unwrap();
         term.draw(|f| {
             render(
                 f,
