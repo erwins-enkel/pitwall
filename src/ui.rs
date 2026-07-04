@@ -1,10 +1,11 @@
 use crate::model::{elapsed_secs, mem_level, slice_total_bytes, Load, MemLevel, RunnerRow};
 use crate::theme::Palette;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
 use ratatui::Frame;
 use std::time::SystemTime;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const KIB: f64 = 1024.0;
 const MIB: f64 = KIB * 1024.0;
@@ -90,7 +91,71 @@ fn load_style(load: Load, p: &Palette) -> Style {
     }
 }
 
-fn table_row(row: &RunnerRow, now: SystemTime, p: &Palette) -> Row<'static> {
+const COL_SPACING: u16 = 1;
+const JOB_IDX: usize = 5;
+const BRANCH_IDX: usize = 6;
+
+/// Column constraints for the runner table. The `job` and `branch` columns are
+/// `Min` so they absorb leftover terminal width; the rest are fixed. This single
+/// array feeds both the rendered `Table` and `column_layout` so the width used to
+/// truncate cells can never diverge from the width ratatui actually allocates.
+fn column_widths() -> [Constraint; 8] {
+    [
+        Constraint::Length(14),
+        Constraint::Length(6),
+        Constraint::Length(SPARK_WIDTH as u16),
+        Constraint::Length(16),
+        Constraint::Length(SPARK_WIDTH as u16),
+        Constraint::Min(12),
+        Constraint::Min(8),
+        Constraint::Length(10),
+    ]
+}
+
+/// The per-column rects ratatui assigns for `area`, computed with the same
+/// `Layout::horizontal(widths).flex(Flex::Start).spacing(..)` call `Table` uses
+/// internally (verified against ratatui-widgets `table.rs`). Reading widths back
+/// from here means we truncate to exactly what gets rendered.
+fn column_layout(area: Rect) -> [Rect; 8] {
+    Layout::horizontal(column_widths())
+        .flex(Flex::Start)
+        .spacing(COL_SPACING)
+        .areas(area)
+}
+
+/// Truncate `s` to at most `max` display columns, appending `…` when it overflows
+/// so the flexing `job`/`branch` columns degrade gracefully instead of ratatui
+/// hard-clipping mid-word. Measured by display width so wide glyphs (CJK/emoji)
+/// stay aligned; the ellipsis takes one column, so the result is at most `max` wide.
+fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let budget = max - 1; // leave one column for the ellipsis
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + cw > budget {
+            break;
+        }
+        out.push(c);
+        width += cw;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+fn table_row(
+    row: &RunnerRow,
+    now: SystemTime,
+    p: &Palette,
+    job_w: usize,
+    branch_w: usize,
+) -> Row<'static> {
     let cpu = format!("{:.1}%", row.cpu_pct);
     // CPU has no per-runner cap in the model, so scale to the window max with a
     // floor. Mem is already a 0..1 fraction of the limit, so scale to 1.0.
@@ -143,8 +208,8 @@ fn table_row(row: &RunnerRow, now: SystemTime, p: &Palette) -> Row<'static> {
         Cell::from(cpu_spark),
         mem_cell,
         Cell::from(mem_spark),
-        Cell::from(job),
-        Cell::from(branch),
+        Cell::from(truncate_ellipsis(&job, job_w)),
+        Cell::from(truncate_ellipsis(&branch, branch_w)),
         Cell::from(elapsed),
     ])
     .style(load_style(row.load, p))
@@ -165,24 +230,19 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     .style(Style::new().fg(p.text).bg(p.base).bold());
     // job & branch flex to absorb slack, so the layout degrades gracefully on
     // narrow terminals instead of the fixed columns dropping off the right edge.
+    // Read their allocated widths back from the same layout the Table uses, then
+    // truncate those cells to fit (ratatui hard-clips without an ellipsis).
+    let cols = column_layout(area);
+    let job_w = cols[JOB_IDX].width as usize;
+    let branch_w = cols[BRANCH_IDX].width as usize;
     let rows: Vec<Row> = view
         .rows
         .iter()
-        .map(|r| table_row(r, view.now, p))
+        .map(|r| table_row(r, view.now, p, job_w, branch_w))
         .collect();
-    let widths = [
-        Constraint::Length(14),
-        Constraint::Length(6),
-        Constraint::Length(SPARK_WIDTH as u16),
-        Constraint::Length(16),
-        Constraint::Length(SPARK_WIDTH as u16),
-        Constraint::Min(12),
-        Constraint::Min(8),
-        Constraint::Length(10),
-    ];
-    let table = Table::new(rows, widths)
+    let table = Table::new(rows, column_widths())
         .header(header)
-        .column_spacing(1)
+        .column_spacing(COL_SPACING)
         .style(Style::new().fg(p.text).bg(p.base));
     frame.render_widget(table, area);
 }
@@ -408,6 +468,59 @@ mod tests {
     }
 
     #[test]
+    fn column_layout_matches_ratatui_solver() {
+        // Widths/positions read back from ratatui's own solver (locked from the
+        // real layout). job gets the odd leftover column, branch one less.
+        let c = column_layout(Rect::new(0, 0, 120, 1));
+        assert_eq!((c[JOB_IDX].x, c[JOB_IDX].width), (81, 14));
+        assert_eq!((c[BRANCH_IDX].x, c[BRANCH_IDX].width), (96, 13));
+
+        let c = column_layout(Rect::new(0, 0, 200, 1));
+        assert_eq!(c[JOB_IDX].width, 54);
+        assert_eq!(c[BRANCH_IDX].width, 53);
+
+        // Narrow: flex columns bottom out at their Min minimums, never underflow.
+        let c = column_layout(Rect::new(0, 0, 64, 1));
+        assert_eq!(c[JOB_IDX].width, 12);
+        assert_eq!(c[BRANCH_IDX].width, 8);
+    }
+
+    #[test]
+    fn truncate_ellipsis_fits_untouched() {
+        assert_eq!(truncate_ellipsis("abc", 5), "abc");
+        assert_eq!(truncate_ellipsis("abcde", 5), "abcde"); // exact fit, no ellipsis
+        assert_eq!(truncate_ellipsis("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_ellipsis_overflow_is_exactly_max_wide() {
+        let r = truncate_ellipsis("Security \u{203a} Dependency review", 12);
+        assert_eq!(UnicodeWidthStr::width(r.as_str()), 12);
+        assert!(r.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_ellipsis_wide_glyphs_stay_within_max() {
+        // CJK glyphs are 2 columns each; result must not exceed max.
+        let r = truncate_ellipsis("\u{65e5}\u{672c}\u{8a9e} test", 6);
+        assert!(UnicodeWidthStr::width(r.as_str()) <= 6);
+        assert!(r.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_ellipsis_control_char_no_panic() {
+        // Control chars report width None; unwrap_or(0) keeps the loop sound (no
+        // panic) and bounded under the same per-char measure the function uses.
+        let r = truncate_ellipsis("a\u{7}bcdefghij", 5);
+        let width: usize = r
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
+        assert!(width <= 5);
+        assert!(r.ends_with('\u{2026}'));
+    }
+
+    #[test]
     fn renders_without_panic_and_shows_runner() {
         let rows = vec![
             RunnerRow {
@@ -445,6 +558,119 @@ mod tests {
         assert!(content.contains("branch"));
         assert!(content.contains("main"));
         assert!(content.contains("elapsed"));
+    }
+
+    fn busy_row(
+        name: &str,
+        workflow: &str,
+        job: &str,
+        branch: &str,
+        elapsed_secs: u64,
+    ) -> RunnerRow {
+        RunnerRow {
+            name: name.into(),
+            cpu_pct: 12.0,
+            mem_bytes: 47 * 1024 * 1024,
+            mem_limit: 8 * 1024 * 1024 * 1024,
+            job: Some(crate::model::JobInfo {
+                workflow: workflow.into(),
+                job: job.into(),
+                branch: branch.into(),
+                started_at: SystemTime::now() - std::time::Duration::from_secs(elapsed_secs),
+            }),
+            load: Load::Busy,
+            cpu_hist: vec![],
+            mem_hist: vec![],
+        }
+    }
+
+    fn render_to_string(width: u16, rows: &[RunnerRow]) -> String {
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows,
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
+                },
+            );
+        })
+        .unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn wide_terminal_shows_full_job_branch_and_fixed_columns() {
+        let rows = vec![busy_row(
+            "ci-runner-1",
+            "Security",
+            "Dependency review",
+            "feature/long-branch-name",
+            5025, // 1:23:45
+        )];
+        // 160 wide leaves job=34 / branch=33 cols — ample for the full strings.
+        let content = render_to_string(160, &rows);
+        // Flexing columns fully visible (no ellipsis).
+        assert!(content.contains("Security \u{203a} Dependency review"));
+        assert!(content.contains("feature/long-branch-name"));
+        assert!(!content.contains('\u{2026}'));
+        // Fixed columns un-clipped: if the job read-back diverged from the Table's
+        // real layout, the last (elapsed) column would be pushed off / clipped.
+        assert!(content.contains("ci-runner-1"));
+        assert!(content.contains("47.0MiB/8.0GiB"));
+        assert!(content.contains("1:23:45"));
+    }
+
+    #[test]
+    fn narrow_terminal_truncates_job_and_branch_with_trailing_ellipsis() {
+        let rows = vec![busy_row(
+            "ci-runner-1",
+            "Security",
+            "Dependency review",
+            "feature/long-branch-name",
+            30,
+        )];
+        let width = 64;
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &rows,
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
+                },
+            );
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        // No banner: title y=0, header y=1, first data row y=2.
+        let data_y = 2;
+        let cols = column_layout(Rect::new(0, 0, width, 1));
+        // job (12 wide) and branch (8 wide) are both narrower than their content,
+        // so the ellipsis must be the trailing glyph at each column's last cell.
+        let job_last_x = cols[JOB_IDX].x + cols[JOB_IDX].width - 1;
+        let branch_last_x = cols[BRANCH_IDX].x + cols[BRANCH_IDX].width - 1;
+        assert_eq!(buf[(job_last_x, data_y)].symbol(), "\u{2026}");
+        assert_eq!(buf[(branch_last_x, data_y)].symbol(), "\u{2026}");
     }
 
     #[test]
