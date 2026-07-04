@@ -115,16 +115,20 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
     }
 }
 
-/// Applies a resource poll result to the slice named by `update.source`. The
-/// error banner always reflects the latest poll, but the data only replaces on
-/// success (`error: None`) so a transient failure of one source never wipes its
-/// last-known-good rows — and never touches the other source's rows. On a
-/// successful poll we append a history sample for *only the updated source's*
-/// runners (so each runner gets one sample per its own 2s poll — the ~40s
-/// window holds), while pruning against the union so the other source's series
-/// survive.
+/// Applies a resource poll result to the slice named by `update.source`, and (on
+/// applied data) appends a history sample for *only the updated source's* runners
+/// — so each runner gets one sample per its own 2s poll (the ~40s window holds)
+/// — while pruning against the union so the other source's series survive.
+///
+/// The two sources handle their `error` differently, matching what an error
+/// means for each. A **docker** error is a top-level list/connect failure: the
+/// whole poll is invalid, so the last-known-good docker slice is preserved and
+/// nothing is recorded. A **native** error only names the individual runners a
+/// cgroup read failed for; the poller still sends the complete healthy set, so
+/// it is applied (and recorded) regardless of the banner — one failed runner
+/// never freezes the healthy rows.
 fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
-    match update.source {
+    let applied = match update.source {
         SourceKind::Docker => {
             state.docker_err = update.error;
             if state.docker_err.is_none() {
@@ -132,23 +136,18 @@ fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
                 // matched/unmatched are a docker-prefix concept only.
                 state.matched_seen = update.matched_seen;
                 state.unmatched_seen = update.unmatched_seen;
+                true
+            } else {
+                false
             }
         }
         SourceKind::Native => {
             state.native_err = update.error;
-            if state.native_err.is_none() {
-                state.native_resources = update.resources;
-            }
+            state.native_resources = update.resources;
+            true
         }
-    }
-    let updated_ok = match update.source {
-        SourceKind::Docker => state.docker_err.is_none(),
-        SourceKind::Native => state.native_err.is_none(),
     };
-    if updated_ok {
-        // Sample only the source that just polled (one point per 2s per runner);
-        // prune against the union so the other source's series aren't dropped.
-        // Recording only on success means a transient failure appends no point.
+    if applied {
         let all = state.all_resources();
         let sample = match update.source {
             SourceKind::Docker => &state.docker_resources,
@@ -306,6 +305,35 @@ mod tests {
 
         assert_eq!(state.native_resources.len(), 1);
         assert!(state.native_err.is_none());
+    }
+
+    #[test]
+    fn native_partial_error_applies_healthy_and_still_banners() {
+        // One native runner failed to read; the poller drops it and sends the
+        // healthy set with a banner. The app must apply the fresh healthy rows
+        // (not freeze the whole slice) while surfacing the banner.
+        let mut state = AppState {
+            native_resources: vec![resource("stale-runner", SourceKind::Native)],
+            ..Default::default()
+        };
+
+        apply_resource_update(
+            &mut state,
+            native_update(
+                vec![resource("ltdovr", SourceKind::Native)],
+                Some("native: scoop-vanscout: denied".to_string()),
+            ),
+        );
+
+        // Healthy fresh row applied (old stale slice replaced), banner shown, and
+        // the healthy runner's history recorded despite the error.
+        assert_eq!(state.native_resources.len(), 1);
+        assert_eq!(state.native_resources[0].name, "ltdovr");
+        assert_eq!(
+            state.native_err.as_deref(),
+            Some("native: scoop-vanscout: denied")
+        );
+        assert!(!state.history.cpu("ltdovr").is_empty());
     }
 
     #[test]

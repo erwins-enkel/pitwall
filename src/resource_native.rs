@@ -227,8 +227,10 @@ enum ReadOutcome {
     /// The cgroup files are gone (`ENOENT`) — the unit stopped. Dropped silently
     /// this cycle, like an ephemeral docker container that deregistered.
     Gone,
-    /// A genuine read error (e.g. permissions) — surfaced as a banner while the
-    /// app keeps the last-known-good slice.
+    /// A genuine read error (e.g. permissions). Dropped from this cycle's
+    /// resource set — like the docker path skipping a container whose stats fail
+    /// — while its message is surfaced as a banner. The healthy runners keep
+    /// their fresh readings.
     Err(String),
 }
 
@@ -294,17 +296,17 @@ fn collect_one(r: &NativeRunner, prev: &mut HashMap<String, (u64, Instant)>) -> 
     })
 }
 
-/// Turn per-runner errors into the poll result. Any genuine read error yields a
-/// banner and an empty resource set, so the app keeps its last-known-good native
-/// slice (mirroring the docker path's whole-collection preserve-on-error).
-fn finalize(
-    resources: Vec<RunnerResource>,
-    errs: Vec<String>,
-) -> (Vec<RunnerResource>, Option<String>) {
+/// Banner for the runners that failed to read this cycle (empty → `None`). The
+/// healthy runners' fresh readings are sent alongside it and applied regardless,
+/// so one failed runner never freezes the others. This is NOT the docker
+/// whole-collection preserve: docker sets an error only on a top-level
+/// list/connect failure (whole poll invalid), whereas here the poll is valid and
+/// only names the individual runners it couldn't read.
+fn native_banner(errs: &[String]) -> Option<String> {
     if errs.is_empty() {
-        (resources, None)
+        None
     } else {
-        (Vec::new(), Some(format!("native: {}", errs.join("; "))))
+        Some(format!("native: {}", errs.join("; ")))
     }
 }
 
@@ -323,7 +325,9 @@ pub async fn run(runners: Vec<NativeRunner>, tx: mpsc::Sender<ResourceUpdate>) {
                 ReadOutcome::Err(e) => errs.push(e),
             }
         }
-        let (resources, error) = finalize(resources, errs);
+        // Keep the healthy runners' fresh readings; only failed runners are
+        // dropped from the set and named in the banner.
+        let error = native_banner(&errs);
         let _ = tx
             .send(ResourceUpdate {
                 source: SourceKind::Native,
@@ -424,23 +428,19 @@ mod tests {
     }
 
     #[test]
-    fn finalize_reports_and_preserves_on_error() {
-        // No errors → fresh resources pass through, no banner.
-        let res = vec![RunnerResource {
-            name: "ltdovr".into(),
-            cpu_pct: 0.0,
-            mem_bytes: 1,
-            mem_limit: 0,
-            key: None,
-            kind: SourceKind::Native,
-        }];
-        let (out, err) = finalize(res.clone(), vec![]);
-        assert_eq!(out.len(), 1);
-        assert!(err.is_none());
-        // Any error → empty set (app keeps last-known-good) + a banner naming it.
-        let (out, err) = finalize(res, vec!["scoop-vanscout: denied".into()]);
-        assert!(out.is_empty());
-        assert_eq!(err.as_deref(), Some("native: scoop-vanscout: denied"));
+    fn native_banner_names_failed_runners_only() {
+        // No failures → no banner.
+        assert!(native_banner(&[]).is_none());
+        // One or more failures → a banner naming each; the healthy runners'
+        // resources are sent separately and are NOT blanked (see run()).
+        assert_eq!(
+            native_banner(&["scoop-vanscout: denied".into()]).as_deref(),
+            Some("native: scoop-vanscout: denied")
+        );
+        assert_eq!(
+            native_banner(&["a: x".into(), "b: y".into()]).as_deref(),
+            Some("native: a: x; b: y")
+        );
     }
 
     #[test]
