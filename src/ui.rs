@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn renders_without_panic_and_shows_runner() {
         let rows = vec![RunnerRow {
-            name: "pulse-ci-runner-1".into(),
+            name: "ci-runner-1".into(),
             cpu_pct: 0.5,
             mem_bytes: 47 * 1024 * 1024,
             mem_limit: 8 * 1024 * 1024 * 1024,
@@ -197,7 +197,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(content.contains("pulse-ci-runner-1"));
+        assert!(content.contains("ci-runner-1"));
         assert!(content.contains("idle"));
     }
 

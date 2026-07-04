@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn resource_error_preserves_last_known() {
         let mut state = AppState {
-            resources: vec![resource("pulse-ci-runner-1"), resource("pulse-ci-runner-2")],
+            resources: vec![resource("ci-runner-1"), resource("ci-runner-2")],
             ..Default::default()
         };
 
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn resource_success_replaces() {
         let mut state = AppState {
-            resources: vec![resource("pulse-ci-runner-1"), resource("pulse-ci-runner-2")],
+            resources: vec![resource("ci-runner-1"), resource("ci-runner-2")],
             resource_err: Some("stale error".to_string()),
             ..Default::default()
         };
@@ -168,7 +168,7 @@ mod tests {
         apply_resource_update(
             &mut state,
             ResourceUpdate {
-                resources: vec![resource("pulse-ci-runner-1")],
+                resources: vec![resource("ci-runner-1")],
                 error: None,
             },
         );

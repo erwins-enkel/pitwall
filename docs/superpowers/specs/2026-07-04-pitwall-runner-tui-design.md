@@ -7,7 +7,7 @@ Status: approved (design), pending implementation plan
 
 A btop-like terminal UI showing, per self-hosted GitHub Actions runner, live
 CPU/mem consumption joined with the repo/workflow/job currently running (if any).
-v1 covers the 6 ephemeral docker "pulse" runners on a single self-hosted CI host.
+v1 covers the 6 ephemeral docker CI runners on a single self-hosted CI host.
 
 ## Decisions (settled)
 
@@ -18,7 +18,7 @@ v1 covers the 6 ephemeral docker "pulse" runners on a single self-hosted CI host
   connection; CPU%/mem computed in-process from consecutive cgroup samples (the
   prior sample is retained per container to delta against).
 - **Jobs:** shell out to the host-authenticated `gh` CLI (no in-Rust GitHub auth).
-- **Runner scope (v1):** pulse docker runners only, single repo. A resource-source
+- **Runner scope (v1):** docker CI runners only, single repo. A resource-source
   abstraction is carried so native (non-docker) runners can be added later without
   reworking the model/UI.
 - **No bash prototype:** both data sources already validated live; go straight to Rust.
@@ -27,7 +27,7 @@ v1 covers the 6 ephemeral docker "pulse" runners on a single self-hosted CI host
 
 ```
  ┌─ resource source (bollard, ~2s poll) ──┐
- │   pulse-ci-runner-* → cpu%, mem        ├─► AppState ─► ui (table + slice gauge)
+ │   ci-runner-* → cpu%, mem        ├─► AppState ─► ui (table + slice gauge)
  ┌─ jobs source (gh shell-out, 15s) ──────┘        ▲
  │   in_progress runs → runner_name→job            └── key events (q quit)
 ```
@@ -39,7 +39,7 @@ Two independent background tasks own all I/O and push updates into a shared
 ## Components (each independently testable)
 
 1. **`resource`** — bollard connects to the rootless docker socket and one-shot polls
-   stats (~2s) for containers whose name starts with `pulse-ci-runner-`. Computes CPU%
+   stats (~2s) for containers whose name starts with `ci-runner-`. Computes CPU%
    and mem usage/limit from consecutive samples (retaining the prior sample per
    container to delta against). Emits
    `RunnerResource { name, cpu_pct, mem_bytes, mem_limit }`.
@@ -68,7 +68,7 @@ Two independent background tasks own all I/O and push updates into a shared
 
 ## Naming / join contract
 
-Container `pulse-ci-runner-N` ↔ GitHub `runner_name` `runner-N`. The join keys on
+Container `ci-runner-N` ↔ GitHub `runner_name` `runner-N`. The join keys on
 the trailing integer N. A runner with a container but no in-progress job is **idle**
 (the expected steady state for ephemeral runners), not an error.
 
@@ -82,7 +82,7 @@ the trailing integer N. A runner with a container but no in-progress job is **id
 ## Config
 
 Constants with env overrides — `PITWALL_REPO` (default `owner/repo`),
-container prefix (default `pulse-ci-runner-`), slice cap (default 24 GiB). No config
+container prefix (default `ci-runner-`), slice cap (default 24 GiB). No config
 file in v1.
 
 ## Testing (TDD)
@@ -92,7 +92,7 @@ file in v1.
 - `gh` JSON parse against a captured fixture.
 - One `TestBackend` render smoke test.
 - Live end-to-end verification against the running runners before "done": trigger a
-  real pulse CI job and confirm it appears joined to the right container.
+  real CI job and confirm it appears joined to the right container.
 
 ## Install
 
@@ -101,4 +101,4 @@ target or short README section documents it.
 
 ## Non-goals (v1)
 
-Native/non-pulse runners, historical graphs/sparklines, config file, alerting.
+Native/non-container runners, historical graphs/sparklines, config file, alerting.

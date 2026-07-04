@@ -175,9 +175,9 @@ mod tests {
 
     #[test]
     fn matches_prefix_ignoring_leading_slash() {
-        assert!(container_matches("/pulse-ci-runner-4", "pulse-ci-runner-"));
-        assert!(container_matches("pulse-ci-runner-1", "pulse-ci-runner-"));
-        assert!(!container_matches("other-thing", "pulse-ci-runner-"));
+        assert!(container_matches("/ci-runner-4", "ci-runner-"));
+        assert!(container_matches("ci-runner-1", "ci-runner-"));
+        assert!(!container_matches("other-thing", "ci-runner-"));
     }
 
     #[test]
