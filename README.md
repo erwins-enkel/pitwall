@@ -53,7 +53,7 @@ All settings are env vars, all optional:
 | Var | Default |
 |---|---|
 | `PITWALL_SOCKET` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
-| `PITWALL_REPO` | `erwins-enkel/pulse` |
+| `PITWALL_REPO` | `owner/repo` (set this to your runners' repo) |
 | `PITWALL_PREFIX` | `pulse-ci-runner-` |
 | `PITWALL_SLICE_CAP_GIB` | `24` |
 

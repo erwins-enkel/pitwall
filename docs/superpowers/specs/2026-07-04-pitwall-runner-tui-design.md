@@ -7,7 +7,7 @@ Status: approved (design), pending implementation plan
 
 A btop-like terminal UI showing, per self-hosted GitHub Actions runner, live
 CPU/mem consumption joined with the repo/workflow/job currently running (if any).
-v1 covers the 6 ephemeral docker "pulse" runners on host `backontop`.
+v1 covers the 6 ephemeral docker "pulse" runners on a single self-hosted CI host.
 
 ## Decisions (settled)
 
@@ -79,7 +79,7 @@ the trailing integer N. A runner with a container but no in-progress job is **id
 
 ## Config
 
-Constants with env overrides — `PITWALL_REPO` (default `erwins-enkel/pulse`),
+Constants with env overrides — `PITWALL_REPO` (default `owner/repo`),
 container prefix (default `pulse-ci-runner-`), slice cap (default 24 GiB). No config
 file in v1.
 

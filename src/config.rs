@@ -32,7 +32,7 @@ impl Config {
                     format!("/run/user/{uid}/docker.sock")
                 })
         });
-        let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "erwins-enkel/pulse".into());
+        let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "owner/repo".into());
         let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "pulse-ci-runner-".into());
         let cap_gib = std::env::var("PITWALL_SLICE_CAP_GIB")
             .ok()
@@ -58,7 +58,7 @@ mod tests {
         std::env::remove_var("PITWALL_PREFIX");
         let c = Config::from_env();
         assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
-        assert_eq!(c.repo, "erwins-enkel/pulse");
+        assert_eq!(c.repo, "owner/repo");
         assert_eq!(c.prefix, "pulse-ci-runner-");
     }
 

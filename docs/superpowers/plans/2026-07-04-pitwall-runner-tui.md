@@ -12,12 +12,12 @@
 
 - Rust edition 2021; toolchain already installed (rustc 1.95).
 - Docker access is **rootless**: socket `unix:///run/user/1000/docker.sock` (respect `DOCKER_HOST` env if set). The rootful `/var/run/docker.sock` does NOT see these containers.
-- **Join key (validated against live `gh api`):** container `pulse-ci-runner-N` (`run-runner.sh` sets `--name pulse-ci-${runner_name}`) ↔ GitHub `runner_name` = `runner-N` (`RUNNER_NAME=runner-N`). Match jobs whose `runner_name` is **exactly `runner-<digits>`**, then key on the integer N.
+- **Join key (validated against live `gh api`):** container `pulse-ci-runner-N` ↔ GitHub `runner_name` = `runner-N`. Match jobs whose `runner_name` is **exactly `runner-<digits>`**, then key on the integer N.
 - **Exclude non-pulse jobs:** `runner_name` may be a GitHub-hosted runner like `"GitHub Actions 1000013810"` (confirmed in real payloads) — these must NOT join. The strict `^runner-\d+$` match handles this.
 - **Only `status == "in_progress"` jobs carry a live runner.** Queued jobs have no/blank `runner_name`; **completed jobs retain a stale `runner_name`** and must be excluded. Filter runs with `?status=in_progress` (bounds API calls/rate limits) AND filter jobs to `in_progress`.
 - Container up + no in-progress GitHub job = **idle** (expected steady state, never an error).
 - Jobs polled every 15s (rate-limit safe); docker stats polled every 2s.
-- **All environment coupling is config, loaded at startup** (`src/config.rs`), overridable by env with defaults: `PITWALL_SOCKET` (default `$DOCKER_HOST` sans `unix://`, else `/run/user/$UID/docker.sock`), `PITWALL_REPO` = `erwins-enkel/pulse`, `PITWALL_PREFIX` = `pulse-ci-runner-`, `PITWALL_SLICE_CAP_GIB` = `24`. No value is hardcoded at a use-site; sources/UI read `Config`.
+- **All environment coupling is config, loaded at startup** (`src/config.rs`), overridable by env with defaults: `PITWALL_SOCKET` (default `$DOCKER_HOST` sans `unix://`, else `/run/user/$UID/docker.sock`), `PITWALL_REPO` = `owner/repo`, `PITWALL_PREFIX` = `pulse-ci-runner-`, `PITWALL_SLICE_CAP_GIB` = `24`. No value is hardcoded at a use-site; sources/UI read `Config`.
 - **Never panic into a broken terminal:** `ratatui::init()` installs a panic hook that restores; sources degrade (socket down / `gh` unauthenticated / zero runners) to a status banner + empty state, never a process exit.
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` must all pass; never suppress warnings to pass.
 - Binary installs to `~/.local/bin/pitwall`.
@@ -112,7 +112,7 @@ impl Config {
                     format!("/run/user/{uid}/docker.sock")
                 })
         });
-        let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "erwins-enkel/pulse".into());
+        let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "owner/repo".into());
         let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "pulse-ci-runner-".into());
         let cap_gib = std::env::var("PITWALL_SLICE_CAP_GIB").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(24);
         Config { socket_path, repo, prefix, slice_cap_bytes: cap_gib * 1024 * 1024 * 1024 }
@@ -129,7 +129,7 @@ mod tests {
         std::env::remove_var("PITWALL_REPO");
         let c = Config::from_env();
         assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
-        assert_eq!(c.repo, "erwins-enkel/pulse");
+        assert_eq!(c.repo, "owner/repo");
         assert_eq!(c.prefix, "pulse-ci-runner-");
     }
 }
@@ -574,8 +574,8 @@ fn to_resource(
 
 ```bash
 # a run id (any status) + confirm runner_name shapes
-RID=$(gh api 'repos/erwins-enkel/pulse/actions/runs?per_page=1' --jq '.workflow_runs[0].id')
-gh api "repos/erwins-enkel/pulse/actions/runs/$RID/jobs" \
+RID=$(gh api 'repos/owner/repo/actions/runs?per_page=1' --jq '.workflow_runs[0].id')
+gh api "repos/owner/repo/actions/runs/$RID/jobs" \
   --jq '.jobs[] | {name, status, runner_name, started_at}'
 ```
 
@@ -878,7 +878,7 @@ install:
 
 - [ ] **Step 2: README** — usage: run `pitwall`, env overrides, rootless-docker note, `just install`.
 
-- [ ] **Step 3: Live join verification** — trigger a real pulse CI job (push a trivial commit / `gh workflow run` on `erwins-enkel/pulse`), run `pitwall`, and confirm the busy runner's row shows the correct `workflow › job` and a ticking `elapsed`, joined to the right `pulse-ci-runner-N`. Capture the observation.
+- [ ] **Step 3: Live join verification** — trigger a real pulse CI job (push a trivial commit / `gh workflow run` on `owner/repo`), run `pitwall`, and confirm the busy runner's row shows the correct `workflow › job` and a ticking `elapsed`, joined to the right `pulse-ci-runner-N`. Capture the observation.
 
 - [ ] **Step 4: Final gates** — `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 
