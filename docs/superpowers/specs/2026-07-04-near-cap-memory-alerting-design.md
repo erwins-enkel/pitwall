@@ -38,6 +38,9 @@ colors always agree.
   (integer percents, e.g. `75`, `90`).
 - Parse rule: clamp each to `0..=100`; if `warn > crit`, pin `warn = crit` so the
   state can never invert. Stored as fractions (`f64`, `0.0..=1.0`).
+- Degenerate `crit = 0` (which pins `warn = 0` → every ratio Critical/red) is
+  **accepted as deliberate misconfiguration**, not guarded: setting crit to 0 is
+  an explicit "always alert" override.
 
 ### `model.rs`
 
@@ -55,7 +58,11 @@ colors always agree.
   - `Warn → Load::Warn`
   - `Normal → Busy` if a job is joined, else `Idle`
 
-  Memory pressure still overrides job state, exactly as today.
+  **Precedence — memory pressure overrides job state** (as today for NearCap, now
+  extended to Warn): a runner with a live job whose memory is in the 75–90% band
+  renders `Load::Warn` (yellow), *not* `Busy` (green). This is deliberate — the
+  operator should see pressure regardless of whether a job is currently joined
+  (jobs poll only every ~15s and ephemeral runners deregister between jobs).
 
 ### `config.rs`
 
@@ -68,10 +75,12 @@ colors always agree.
 - `load_style`: add `Load::Warn => Yellow`. Idle / Busy / NearCap unchanged.
 - Gauge: classify the slice ratio through `mem_level` → cyan (normal) /
   yellow (warn) / red (critical). Append a **text marker** so the signal is not
-  color-only (accessibility + the issue's "visual emphasis"):
+  color-only (accessibility + the issue's "visual emphasis"). Use the codebase's
+  `\u{...}` escape convention (as with existing `\u{203a}`/`\u{2014}`/`\u{2026}`),
+  i.e. `\u{26a0}` for the warning sign:
   - normal: `"{used} / {cap} GiB"` (unchanged)
-  - warn: append ` ⚠ warn`
-  - critical: append ` ⚠ NEAR CAP`
+  - warn: append ` \u{26a0} warn`
+  - critical: append ` \u{26a0} NEAR CAP`
 - `View` carries `warn_ratio`/`crit_ratio` so the gauge classifies through the
   same `mem_level` helper as the rows.
 
@@ -98,15 +107,24 @@ Follows the existing unit-test patterns.
 
 - `model.rs`: `mem_level` boundaries — below warn = `Normal`, at warn = `Warn`,
   at crit = `Critical`, `limit == 0` = `Normal`. `join`: a runner in the warn
-  band yields `Load::Warn`; existing idle/busy/near-cap tests still pass.
+  band yields `Load::Warn`; **a busy runner (job present) in the warn band yields
+  `Load::Warn`, not `Busy`** (precedence); existing idle/busy/near-cap tests still
+  pass.
 - `config.rs`: defaults (75/90 → 0.75/0.90); clamp out-of-range; `warn > crit`
   pins `warn = crit`.
-- `ui.rs`: via `TestBackend`, a slice ratio in the warn band renders the ` ⚠ warn`
-  marker; critical renders ` ⚠ NEAR CAP`; normal renders neither.
+- `ui.rs`: via `TestBackend` — **marker text**: a slice ratio in the warn band
+  renders ` \u{26a0} warn`, critical renders ` \u{26a0} NEAR CAP`, normal renders
+  neither. **Actual color** (the primary deliverable, asserted on buffer cell
+  `.fg`/`.style`, not just text): a `Load::Warn` row cell is `Color::Yellow`; the
+  gauge cells are yellow in the warn band and red in the critical band.
 
 ## Success criteria
 
 - Slice gauge turns yellow ≥ warn, red ≥ crit, with the matching text marker.
 - Runner rows turn yellow ≥ warn (new), red ≥ crit (unchanged threshold).
 - Thresholds configurable via the two env vars; misconfiguration can't invert.
+- Live check acted upon: if warn=75% fires near-continuously on normally-busy CI
+  runners (making yellow the de-facto busy color), the default warn is raised to
+  sit just above observed steady-state busy memory (candidate 85%, ≥5-point band
+  below crit); observed value + chosen default recorded in the PR.
 - `cargo test`, `cargo clippy`, `cargo fmt --check` all clean.
