@@ -90,14 +90,14 @@ mod tests {
 
     #[test]
     fn parses_runner_index() {
-        assert_eq!(runner_index("pulse-ci-runner-4"), Some(4));
+        assert_eq!(runner_index("ci-runner-4"), Some(4));
         assert_eq!(runner_index("runner-2"), Some(2));
         assert_eq!(runner_index("nope"), None);
     }
 
     #[test]
     fn no_job_is_idle() {
-        let rows = join(vec![res("pulse-ci-runner-1", 100)], &HashMap::new());
+        let rows = join(vec![res("ci-runner-1", 100)], &HashMap::new());
         assert!(matches!(rows[0].load, Load::Idle));
         assert!(rows[0].job.is_none());
     }
@@ -114,7 +114,7 @@ mod tests {
                 started_at: now - Duration::from_secs(30),
             },
         );
-        let rows = join(vec![res("pulse-ci-runner-1", 100)], &jobs);
+        let rows = join(vec![res("ci-runner-1", 100)], &jobs);
         assert!(matches!(rows[0].load, Load::Busy));
         assert_eq!(
             elapsed_secs(rows[0].job.as_ref().unwrap().started_at, now),
@@ -126,7 +126,7 @@ mod tests {
     fn high_mem_is_near_cap() {
         let cap = 8u64 * 1024 * 1024 * 1024;
         let rows = join(
-            vec![res("pulse-ci-runner-1", (cap as f64 * 0.95) as u64)],
+            vec![res("ci-runner-1", (cap as f64 * 0.95) as u64)],
             &HashMap::new(),
         );
         assert!(matches!(rows[0].load, Load::NearCap));
@@ -135,10 +135,10 @@ mod tests {
     #[test]
     fn rows_sorted_by_index_and_slice_summed() {
         let rows = join(
-            vec![res("pulse-ci-runner-3", 300), res("pulse-ci-runner-1", 100)],
+            vec![res("ci-runner-3", 300), res("ci-runner-1", 100)],
             &HashMap::new(),
         );
-        assert_eq!(rows[0].name, "pulse-ci-runner-1");
+        assert_eq!(rows[0].name, "ci-runner-1");
         assert_eq!(slice_total_bytes(&rows), 400);
     }
 }

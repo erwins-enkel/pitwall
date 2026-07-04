@@ -33,7 +33,7 @@ impl Config {
                 })
         });
         let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "owner/repo".into());
-        let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "pulse-ci-runner-".into());
+        let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "ci-runner-".into());
         let cap_gib = std::env::var("PITWALL_SLICE_CAP_GIB")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -59,7 +59,7 @@ mod tests {
         let c = Config::from_env();
         assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
         assert_eq!(c.repo, "owner/repo");
-        assert_eq!(c.prefix, "pulse-ci-runner-");
+        assert_eq!(c.prefix, "ci-runner-");
     }
 
     #[test]

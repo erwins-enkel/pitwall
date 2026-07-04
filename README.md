@@ -1,6 +1,6 @@
 # pitwall
 
-btop-like terminal UI for self-hosted `pulse` GitHub Actions runners: live CPU/mem per runner container, joined with the workflow › job currently running.
+btop-like terminal UI for self-hosted GitHub Actions runners: live CPU/mem per runner container, joined with the workflow › job currently running.
 
 ## What you see
 
@@ -9,7 +9,7 @@ A table, one row per runner:
 | runner | cpu | mem | workflow › job | elapsed |
 |---|---|---|---|---|
 
-- **runner** — container name, e.g. `pulse-ci-runner-1`.
+- **runner** — container name, e.g. `ci-runner-1`.
 - **cpu / mem** — live usage from rootless docker (mem shown as `used/limit`).
 - **workflow › job** — `— idle` when no in-progress job is joined, else `Workflow Name › Job Name`.
 - **elapsed** — ticking duration since the job started; `-` when idle.
@@ -54,13 +54,13 @@ All settings are env vars, all optional:
 |---|---|
 | `PITWALL_SOCKET` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
 | `PITWALL_REPO` | `owner/repo` (set this to your runners' repo) |
-| `PITWALL_PREFIX` | `pulse-ci-runner-` |
+| `PITWALL_PREFIX` | `ci-runner-` |
 | `PITWALL_SLICE_CAP_GIB` | `24` |
 
 ## How it works
 
 - **Resources** — polled every ~2s via `bollard` against the rootless docker socket. Docker's stats API is one-shot (no streaming), so pitwall retains the previous poll's CPU counters per container id and computes CPU% as a delta between samples.
 - **Jobs** — polled every ~15s via `gh`. Only in-progress jobs on self-hosted runners are considered; GitHub-hosted, queued, and completed jobs are excluded.
-- **Join** — by trailing runner index: container `pulse-ci-runner-N` matches GitHub runner name `runner-N`.
-- **Gotcha** — a running container with no in-progress job is normal idle state, not an error. `pulse`'s runners are ephemeral and deregister between jobs, so gaps between "container up" and "job assigned" are expected.
+- **Join** — by trailing runner index: container `ci-runner-N` matches GitHub runner name `runner-N`.
+- **Gotcha** — a running container with no in-progress job is normal idle state, not an error. The runners are ephemeral and deregister between jobs, so gaps between "container up" and "job assigned" are expected.
 - **Degradation** — a broken docker socket or `gh` failure surfaces as a red status banner and keeps the last-known-good data on screen instead of blanking the UI; zero matching runners shows "waiting for runners…". No source failure panics; `q`/`Esc`/`Ctrl-C` always restore the terminal.

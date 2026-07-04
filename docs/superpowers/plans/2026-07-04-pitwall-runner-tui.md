@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A btop-like Rust TUI showing, per pulse docker CI runner, live CPU/mem joined with the workflow/job currently running.
+**Goal:** A btop-like Rust TUI showing, per docker CI runner, live CPU/mem joined with the workflow/job currently running.
 
 **Architecture:** Async tokio binary. Two background sources (bollard docker-stats stream; `gh` shell-out for jobs) push updates through an mpsc event channel into a shared `AppState`; a ratatui render loop reads it and draws a table + slice gauge. Pure `model` + math modules hold all testable logic.
 
@@ -12,12 +12,12 @@
 
 - Rust edition 2021; toolchain already installed (rustc 1.95).
 - Docker access is **rootless**: socket `unix:///run/user/1000/docker.sock` (respect `DOCKER_HOST` env if set). The rootful `/var/run/docker.sock` does NOT see these containers.
-- **Join key (validated against live `gh api`):** container `pulse-ci-runner-N` ↔ GitHub `runner_name` = `runner-N`. Match jobs whose `runner_name` is **exactly `runner-<digits>`**, then key on the integer N.
-- **Exclude non-pulse jobs:** `runner_name` may be a GitHub-hosted runner like `"GitHub Actions 1000013810"` (confirmed in real payloads) — these must NOT join. The strict `^runner-\d+$` match handles this.
+- **Join key (validated against live `gh api`):** container `ci-runner-N` ↔ GitHub `runner_name` = `runner-N`. Match jobs whose `runner_name` is **exactly `runner-<digits>`**, then key on the integer N.
+- **Exclude non-self-hosted jobs:** `runner_name` may be a GitHub-hosted runner like `"GitHub Actions 1000013810"` (confirmed in real payloads) — these must NOT join. The strict `^runner-\d+$` match handles this.
 - **Only `status == "in_progress"` jobs carry a live runner.** Queued jobs have no/blank `runner_name`; **completed jobs retain a stale `runner_name`** and must be excluded. Filter runs with `?status=in_progress` (bounds API calls/rate limits) AND filter jobs to `in_progress`.
 - Container up + no in-progress GitHub job = **idle** (expected steady state, never an error).
 - Jobs polled every 15s (rate-limit safe); docker stats polled every 2s.
-- **All environment coupling is config, loaded at startup** (`src/config.rs`), overridable by env with defaults: `PITWALL_SOCKET` (default `$DOCKER_HOST` sans `unix://`, else `/run/user/$UID/docker.sock`), `PITWALL_REPO` = `owner/repo`, `PITWALL_PREFIX` = `pulse-ci-runner-`, `PITWALL_SLICE_CAP_GIB` = `24`. No value is hardcoded at a use-site; sources/UI read `Config`.
+- **All environment coupling is config, loaded at startup** (`src/config.rs`), overridable by env with defaults: `PITWALL_SOCKET` (default `$DOCKER_HOST` sans `unix://`, else `/run/user/$UID/docker.sock`), `PITWALL_REPO` = `owner/repo`, `PITWALL_PREFIX` = `ci-runner-`, `PITWALL_SLICE_CAP_GIB` = `24`. No value is hardcoded at a use-site; sources/UI read `Config`.
 - **Never panic into a broken terminal:** `ratatui::init()` installs a panic hook that restores; sources degrade (socket down / `gh` unauthenticated / zero runners) to a status banner + empty state, never a process exit.
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` must all pass; never suppress warnings to pass.
 - Binary installs to `~/.local/bin/pitwall`.
@@ -113,7 +113,7 @@ impl Config {
                 })
         });
         let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "owner/repo".into());
-        let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "pulse-ci-runner-".into());
+        let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "ci-runner-".into());
         let cap_gib = std::env::var("PITWALL_SLICE_CAP_GIB").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(24);
         Config { socket_path, repo, prefix, slice_cap_bytes: cap_gib * 1024 * 1024 * 1024 }
     }
@@ -130,7 +130,7 @@ mod tests {
         let c = Config::from_env();
         assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
         assert_eq!(c.repo, "owner/repo");
-        assert_eq!(c.prefix, "pulse-ci-runner-");
+        assert_eq!(c.prefix, "ci-runner-");
     }
 }
 ```
@@ -154,7 +154,7 @@ mod tests {
   - `pub enum Load { Idle, Busy, NearCap }`
   - `pub struct RunnerRow { pub name: String, pub cpu_pct: f64, pub mem_bytes: u64, pub mem_limit: u64, pub job: Option<JobInfo>, pub load: Load }`
   - `pub fn join(resources: Vec<RunnerResource>, jobs: &HashMap<u32, JobInfo>, now: SystemTime) -> Vec<RunnerRow>` — sorts by runner index; `load` = `Idle` when no job, `NearCap` when `mem_bytes as f64 / mem_limit as f64 >= 0.9`, else `Busy`.
-  - `pub fn runner_index(name: &str) -> Option<u32>` — parses trailing integer from `pulse-ci-runner-4` → `4`.
+  - `pub fn runner_index(name: &str) -> Option<u32>` — parses trailing integer from `ci-runner-4` → `4`.
   - `pub fn slice_total_bytes(rows: &[RunnerRow]) -> u64` — sums `mem_bytes`.
   - `pub fn elapsed_secs(started: SystemTime, now: SystemTime) -> u64`.
 
@@ -172,14 +172,14 @@ mod tests {
 
     #[test]
     fn parses_runner_index() {
-        assert_eq!(runner_index("pulse-ci-runner-4"), Some(4));
+        assert_eq!(runner_index("ci-runner-4"), Some(4));
         assert_eq!(runner_index("runner-2"), Some(2));
         assert_eq!(runner_index("nope"), None);
     }
 
     #[test]
     fn no_job_is_idle() {
-        let rows = join(vec![res("pulse-ci-runner-1", 100)], &HashMap::new(), SystemTime::now());
+        let rows = join(vec![res("ci-runner-1", 100)], &HashMap::new(), SystemTime::now());
         assert!(matches!(rows[0].load, Load::Idle));
         assert!(rows[0].job.is_none());
     }
@@ -189,7 +189,7 @@ mod tests {
         let now = SystemTime::now();
         let mut jobs = HashMap::new();
         jobs.insert(1u32, JobInfo { workflow: "ci".into(), job: "test".into(), started_at: now - Duration::from_secs(30) });
-        let rows = join(vec![res("pulse-ci-runner-1", 100)], &jobs, now);
+        let rows = join(vec![res("ci-runner-1", 100)], &jobs, now);
         assert!(matches!(rows[0].load, Load::Busy));
         assert_eq!(elapsed_secs(rows[0].job.as_ref().unwrap().started_at, now), 30);
     }
@@ -197,14 +197,14 @@ mod tests {
     #[test]
     fn high_mem_is_near_cap() {
         let cap = 8u64 * 1024 * 1024 * 1024;
-        let rows = join(vec![res("pulse-ci-runner-1", (cap as f64 * 0.95) as u64)], &HashMap::new(), SystemTime::now());
+        let rows = join(vec![res("ci-runner-1", (cap as f64 * 0.95) as u64)], &HashMap::new(), SystemTime::now());
         assert!(matches!(rows[0].load, Load::NearCap));
     }
 
     #[test]
     fn rows_sorted_by_index_and_slice_summed() {
-        let rows = join(vec![res("pulse-ci-runner-3", 300), res("pulse-ci-runner-1", 100)], &HashMap::new(), SystemTime::now());
-        assert_eq!(rows[0].name, "pulse-ci-runner-1");
+        let rows = join(vec![res("ci-runner-3", 300), res("ci-runner-1", 100)], &HashMap::new(), SystemTime::now());
+        assert_eq!(rows[0].name, "ci-runner-1");
         assert_eq!(slice_total_bytes(&rows), 400);
     }
 }
@@ -391,9 +391,9 @@ mod tests {
 
     #[test]
     fn matches_prefix_ignoring_leading_slash() {
-        assert!(container_matches("/pulse-ci-runner-4", "pulse-ci-runner-"));
-        assert!(container_matches("pulse-ci-runner-1", "pulse-ci-runner-"));
-        assert!(!container_matches("other-thing", "pulse-ci-runner-"));
+        assert!(container_matches("/ci-runner-4", "ci-runner-"));
+        assert!(container_matches("ci-runner-1", "ci-runner-"));
+        assert!(!container_matches("other-thing", "ci-runner-"));
     }
 
     #[test]
@@ -580,7 +580,7 @@ gh api "repos/owner/repo/actions/runs/$RID/jobs" \
 ```
 
 Confirmed on 2026-07-04 (bake these facts into the tests):
-  - Self-hosted pulse jobs carry `runner_name` = `runner-<N>` (e.g. `runner-4`) — the join key.
+  - Self-hosted jobs carry `runner_name` = `runner-<N>` (e.g. `runner-4`) — the join key.
   - GitHub-hosted jobs carry `runner_name` = `"GitHub Actions 1000013810"` — **must be excluded**.
   - `status` is `completed` or `in_progress`; **completed jobs keep a stale `runner_name`** — only `in_progress` is a live runner.
   - `started_at` is RFC3339 `Z` (e.g. `2026-07-04T12:25:18Z`).
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn renders_without_panic_and_shows_runner() {
         let rows = vec![RunnerRow {
-            name: "pulse-ci-runner-1".into(),
+            name: "ci-runner-1".into(),
             cpu_pct: 0.5,
             mem_bytes: 47 * 1024 * 1024,
             mem_limit: 8 * 1024 * 1024 * 1024,
@@ -784,7 +784,7 @@ mod tests {
         })
         .unwrap();
         let content = term.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>();
-        assert!(content.contains("pulse-ci-runner-1"));
+        assert!(content.contains("ci-runner-1"));
         assert!(content.contains("idle"));
     }
 
@@ -849,7 +849,7 @@ async fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 3: Build + clippy** — `cargo build && cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Run live (happy path)** — `cargo run`. Confirm all 6 `pulse-ci-runner-*` rows appear, CPU/mem update ~2s (CPU non-zero-capable after the first poll), all show idle, slice gauge populates, `q`/`Esc` quits and restores the terminal.
+- [ ] **Step 4: Run live (happy path)** — `cargo run`. Confirm all 6 `ci-runner-*` rows appear, CPU/mem update ~2s (CPU non-zero-capable after the first poll), all show idle, slice gauge populates, `q`/`Esc` quits and restores the terminal.
 
 - [ ] **Step 5: Verify degradation (reviewer point 5) — no panic, terminal survives:**
   - Socket down: `PITWALL_SOCKET=/nonexistent.sock cargo run` → shows a red `docker: …` banner + empty-state, `q` restores cleanly.
@@ -878,7 +878,7 @@ install:
 
 - [ ] **Step 2: README** — usage: run `pitwall`, env overrides, rootless-docker note, `just install`.
 
-- [ ] **Step 3: Live join verification** — trigger a real pulse CI job (push a trivial commit / `gh workflow run` on `owner/repo`), run `pitwall`, and confirm the busy runner's row shows the correct `workflow › job` and a ticking `elapsed`, joined to the right `pulse-ci-runner-N`. Capture the observation.
+- [ ] **Step 3: Live join verification** — trigger a real CI job (push a trivial commit / `gh workflow run` on `owner/repo`), run `pitwall`, and confirm the busy runner's row shows the correct `workflow › job` and a ticking `elapsed`, joined to the right `ci-runner-N`. Capture the observation.
 
 - [ ] **Step 4: Final gates** — `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 
