@@ -457,6 +457,19 @@ mod tests {
         assert!(res.is_err());
     }
 
+    /// The checked-in `config.example.toml` must stay loadable: valid TOML, no
+    /// unknown/renamed keys (else `deny_unknown_fields` rejects it), and its one
+    /// active key `repo` deserializing as documented. Guards the example against
+    /// silent drift when a `FileConfig` key is renamed.
+    #[test]
+    fn shipped_example_config_loads() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        let cfg = load_file(ConfigPath::Explicit(p))
+            .expect("config.example.toml must parse")
+            .expect("config.example.toml must exist");
+        assert_eq!(cfg.repo.as_deref(), Some("your-org/your-repo"));
+    }
+
     // ---- unix_socket_from_docker_host() ---------------------------------
 
     #[test]
