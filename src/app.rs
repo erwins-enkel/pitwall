@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::history::History;
 use crate::jobs::{self, JobsUpdate};
 use crate::model::{join, JobInfo, RunnerResource};
 use crate::resource::{self, ResourceUpdate};
@@ -14,6 +15,7 @@ use tokio::time::interval;
 struct AppState {
     resources: Vec<RunnerResource>,
     jobs: HashMap<u32, JobInfo>,
+    history: History,
     resource_err: Option<String>,
     jobs_err: Option<String>,
 }
@@ -71,6 +73,9 @@ fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
     state.resource_err = update.error;
     if state.resource_err.is_none() {
         state.resources = update.resources;
+        // Sample rides the 2s poll cadence and only on success, so a transient
+        // failure neither appends a bogus point nor drops history.
+        state.history.record(&state.resources);
     }
 }
 
@@ -101,7 +106,7 @@ fn draw(
         .resource_err
         .clone()
         .or_else(|| state.jobs_err.clone());
-    let rows = join(state.resources.clone(), &state.jobs);
+    let rows = join(state.resources.clone(), &state.jobs, &state.history);
     terminal.draw(|f| {
         ui::render(
             f,
@@ -175,6 +180,40 @@ mod tests {
 
         assert_eq!(state.resources.len(), 1);
         assert!(state.resource_err.is_none());
+    }
+
+    #[test]
+    fn success_poll_appends_history() {
+        let mut state = AppState::default();
+        apply_resource_update(
+            &mut state,
+            ResourceUpdate {
+                resources: vec![resource("pulse-ci-runner-1")],
+                error: None,
+            },
+        );
+        assert_eq!(state.history.cpu("pulse-ci-runner-1").len(), 1);
+    }
+
+    #[test]
+    fn error_poll_does_not_touch_history() {
+        let mut state = AppState::default();
+        apply_resource_update(
+            &mut state,
+            ResourceUpdate {
+                resources: vec![resource("pulse-ci-runner-1")],
+                error: None,
+            },
+        );
+        apply_resource_update(
+            &mut state,
+            ResourceUpdate {
+                resources: vec![],
+                error: Some("docker: x".to_string()),
+            },
+        );
+        // The error poll neither appended a point nor cleared the series.
+        assert_eq!(state.history.cpu("pulse-ci-runner-1").len(), 1);
     }
 
     #[test]

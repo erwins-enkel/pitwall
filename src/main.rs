@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod history;
 mod jobs;
 mod model;
 mod resource;

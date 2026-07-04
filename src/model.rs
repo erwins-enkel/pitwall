@@ -1,3 +1,4 @@
+use crate::history::History;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -32,6 +33,8 @@ pub struct RunnerRow {
     pub mem_limit: u64,
     pub job: Option<JobInfo>,
     pub load: Load,
+    pub cpu_hist: Vec<f64>, // percent, oldest→newest
+    pub mem_hist: Vec<f64>, // fraction 0..1, oldest→newest
 }
 
 pub fn runner_index(name: &str) -> Option<u32> {
@@ -48,7 +51,11 @@ pub fn slice_total_bytes(rows: &[RunnerRow]) -> u64 {
     rows.iter().map(|r| r.mem_bytes).sum()
 }
 
-pub fn join(resources: Vec<RunnerResource>, jobs: &HashMap<u32, JobInfo>) -> Vec<RunnerRow> {
+pub fn join(
+    resources: Vec<RunnerResource>,
+    jobs: &HashMap<u32, JobInfo>,
+    history: &History,
+) -> Vec<RunnerRow> {
     let mut rows: Vec<RunnerRow> = resources
         .into_iter()
         .map(|r| {
@@ -61,6 +68,8 @@ pub fn join(resources: Vec<RunnerResource>, jobs: &HashMap<u32, JobInfo>) -> Vec
             } else {
                 Load::Idle
             };
+            let cpu_hist = history.cpu(&r.name).to_vec();
+            let mem_hist = history.mem_frac(&r.name).to_vec();
             RunnerRow {
                 name: r.name,
                 cpu_pct: r.cpu_pct,
@@ -68,6 +77,8 @@ pub fn join(resources: Vec<RunnerResource>, jobs: &HashMap<u32, JobInfo>) -> Vec
                 mem_limit: r.mem_limit,
                 job,
                 load,
+                cpu_hist,
+                mem_hist,
             }
         })
         .collect();
@@ -98,7 +109,11 @@ mod tests {
 
     #[test]
     fn no_job_is_idle() {
-        let rows = join(vec![res("ci-runner-1", 100)], &HashMap::new());
+        let rows = join(
+            vec![res("ci-runner-1", 100)],
+            &HashMap::new(),
+            &History::default(),
+        );
         assert!(matches!(rows[0].load, Load::Idle));
         assert!(rows[0].job.is_none());
     }
@@ -116,7 +131,7 @@ mod tests {
                 started_at: now - Duration::from_secs(30),
             },
         );
-        let rows = join(vec![res("ci-runner-1", 100)], &jobs);
+        let rows = join(vec![res("ci-runner-1", 100)], &jobs, &History::default());
         assert!(matches!(rows[0].load, Load::Busy));
         assert_eq!(
             elapsed_secs(rows[0].job.as_ref().unwrap().started_at, now),
@@ -130,8 +145,22 @@ mod tests {
         let rows = join(
             vec![res("ci-runner-1", (cap as f64 * 0.95) as u64)],
             &HashMap::new(),
+            &History::default(),
         );
         assert!(matches!(rows[0].load, Load::NearCap));
+    }
+
+    #[test]
+    fn join_copies_history_into_rows() {
+        let mut history = History::default();
+        history.record(&[res("ci-runner-1", 100)]);
+        history.record(&[res("ci-runner-1", 100)]);
+        let rows = join(vec![res("ci-runner-1", 100)], &HashMap::new(), &history);
+        assert_eq!(rows[0].cpu_hist.len(), 2);
+        assert_eq!(rows[0].mem_hist.len(), 2);
+        // An unknown runner (no recorded history) gets empty series.
+        let empty = join(vec![res("ci-runner-9", 100)], &HashMap::new(), &history);
+        assert!(empty[0].cpu_hist.is_empty());
     }
 
     #[test]
@@ -139,6 +168,7 @@ mod tests {
         let rows = join(
             vec![res("ci-runner-3", 300), res("ci-runner-1", 100)],
             &HashMap::new(),
+            &History::default(),
         );
         assert_eq!(rows[0].name, "ci-runner-1");
         assert_eq!(slice_total_bytes(&rows), 400);
