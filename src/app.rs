@@ -134,6 +134,7 @@ mod tests {
         JobInfo {
             workflow: "ci".into(),
             job: "test".into(),
+            branch: "main".into(),
             started_at: SystemTime::now(),
         }
     }

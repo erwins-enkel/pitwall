@@ -48,18 +48,31 @@ fn load_style(load: Load) -> Style {
 fn table_row(row: &RunnerRow, now: SystemTime) -> Row<'static> {
     let cpu = format!("{:.1}%", row.cpu_pct);
     let mem = format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit));
-    let (job, elapsed) = match &row.job {
-        Some(j) => (
-            format!("{} \u{203a} {}", j.workflow, j.job),
-            fmt_elapsed(elapsed_secs(j.started_at, now)),
+    let (job, branch, elapsed) = match &row.job {
+        Some(j) => {
+            let branch = if j.branch.is_empty() {
+                "-".to_string()
+            } else {
+                j.branch.clone()
+            };
+            (
+                format!("{} \u{203a} {}", j.workflow, j.job),
+                branch,
+                fmt_elapsed(elapsed_secs(j.started_at, now)),
+            )
+        }
+        None => (
+            "\u{2014} idle".to_string(),
+            "-".to_string(),
+            "-".to_string(),
         ),
-        None => ("\u{2014} idle".to_string(), "-".to_string()),
     };
     Row::new(vec![
         Cell::from(row.name.clone()),
         Cell::from(cpu),
         Cell::from(mem),
         Cell::from(job),
+        Cell::from(branch),
         Cell::from(elapsed),
     ])
     .style(load_style(row.load))
@@ -71,15 +84,19 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
         "cpu",
         "mem",
         "workflow \u{203a} job",
+        "branch",
         "elapsed",
     ])
     .style(Style::new().bold());
     let rows: Vec<Row> = view.rows.iter().map(|r| table_row(r, view.now)).collect();
+    // job & branch flex to absorb slack, so the layout degrades gracefully on
+    // narrow terminals instead of the fixed columns dropping off the right edge.
     let widths = [
-        Constraint::Length(20),
+        Constraint::Length(14),
         Constraint::Length(6),
         Constraint::Length(16),
-        Constraint::Length(20),
+        Constraint::Min(12),
+        Constraint::Min(8),
         Constraint::Length(10),
     ];
     let table = Table::new(rows, widths).header(header).column_spacing(1);
@@ -169,14 +186,31 @@ mod tests {
 
     #[test]
     fn renders_without_panic_and_shows_runner() {
-        let rows = vec![RunnerRow {
-            name: "ci-runner-1".into(),
-            cpu_pct: 0.5,
-            mem_bytes: 47 * 1024 * 1024,
-            mem_limit: 8 * 1024 * 1024 * 1024,
-            job: None,
-            load: Load::Idle,
-        }];
+        let rows = vec![
+            RunnerRow {
+                name: "ci-runner-1".into(),
+                cpu_pct: 0.5,
+                mem_bytes: 47 * 1024 * 1024,
+                mem_limit: 8 * 1024 * 1024 * 1024,
+                job: None,
+                load: Load::Idle,
+            },
+            RunnerRow {
+                name: "ci-runner-2".into(),
+                cpu_pct: 90.0,
+                mem_bytes: 47 * 1024 * 1024,
+                mem_limit: 8 * 1024 * 1024 * 1024,
+                job: Some(crate::model::JobInfo {
+                    workflow: "CI".into(),
+                    job: "test".into(),
+                    branch: "main".into(),
+                    started_at: SystemTime::now(),
+                }),
+                load: Load::Busy,
+            },
+        ];
+        // Standard 80-col terminal: the flexible job/branch columns keep all
+        // six columns visible instead of dropping off the right edge.
         let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
         term.draw(|f| {
             render(
@@ -199,6 +233,9 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("ci-runner-1"));
         assert!(content.contains("idle"));
+        assert!(content.contains("branch"));
+        assert!(content.contains("main"));
+        assert!(content.contains("elapsed"));
     }
 
     #[test]

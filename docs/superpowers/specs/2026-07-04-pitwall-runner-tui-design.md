@@ -48,13 +48,14 @@ Two independent background tasks own all I/O and push updates into a shared
    only the docker implementation.
 2. **`jobs`** — every 15s: `gh api repos/{repo}/actions/runs?status=in_progress`,
    then per run `…/runs/{id}/jobs`, mapping each job's `runner_name` ("runner-N") to
-   `JobInfo { workflow, job, started_at }`. Retains last-known values on failure;
+   `JobInfo { workflow, job, branch, started_at }` (branch = the run's `head_branch`).
+   Retains last-known values on failure;
    never panics on rate limits or transient errors.
 3. **`model`** — pure join, no I/O:
    `(Vec<RunnerResource>, Map<name, JobInfo>) → Vec<RunnerRow>`. Classifies
    idle/busy/near-cap, computes elapsed from `started_at`, sums slice memory vs the
    24 GiB cap. Fully unit-tested.
-4. **`ui`** — renders the table `runner | CPU | mem | workflow › job | elapsed` plus
+4. **`ui`** — renders the table `runner | CPU | mem | workflow › job | branch | elapsed` plus
    the slice-total gauge; colors idle/busy/near-cap. A ratatui `TestBackend` render
    smoke test guards layout.
 5. **`app` / `main`** — mpsc event loop; terminal raw-mode setup/teardown; panic hook
