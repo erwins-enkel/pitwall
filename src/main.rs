@@ -1,14 +1,4 @@
-mod app;
-mod config;
-mod history;
-mod jobs;
-mod model;
-mod resource;
-mod resource_docker;
-mod resource_native;
-mod stats_math;
-mod theme;
-mod ui;
+use pitwall::{app, config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
