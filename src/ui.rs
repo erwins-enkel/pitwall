@@ -89,12 +89,14 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     ])
     .style(Style::new().bold());
     let rows: Vec<Row> = view.rows.iter().map(|r| table_row(r, view.now)).collect();
+    // job & branch flex to absorb slack, so the layout degrades gracefully on
+    // narrow terminals instead of the fixed columns dropping off the right edge.
     let widths = [
-        Constraint::Length(20),
+        Constraint::Length(14),
         Constraint::Length(6),
         Constraint::Length(16),
-        Constraint::Length(20),
-        Constraint::Length(22),
+        Constraint::Min(12),
+        Constraint::Min(8),
         Constraint::Length(10),
     ];
     let table = Table::new(rows, widths).header(header).column_spacing(1);
@@ -207,8 +209,9 @@ mod tests {
                 load: Load::Busy,
             },
         ];
-        // Full-width TUI: all six fixed columns fit without truncation.
-        let mut term = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        // Standard 80-col terminal: the flexible job/branch columns keep all
+        // six columns visible instead of dropping off the right edge.
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
         term.draw(|f| {
             render(
                 f,
@@ -232,6 +235,7 @@ mod tests {
         assert!(content.contains("idle"));
         assert!(content.contains("branch"));
         assert!(content.contains("main"));
+        assert!(content.contains("elapsed"));
     }
 
     #[test]
