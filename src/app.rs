@@ -102,7 +102,7 @@ fn draw(
         .resource_err
         .clone()
         .or_else(|| state.jobs_err.clone());
-    let rows = join(state.resources.clone(), &state.jobs, SystemTime::now());
+    let rows = join(state.resources.clone(), &state.jobs);
     terminal.draw(|f| {
         ui::render(
             f,

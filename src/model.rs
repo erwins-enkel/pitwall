@@ -47,11 +47,7 @@ pub fn slice_total_bytes(rows: &[RunnerRow]) -> u64 {
     rows.iter().map(|r| r.mem_bytes).sum()
 }
 
-pub fn join(
-    resources: Vec<RunnerResource>,
-    jobs: &HashMap<u32, JobInfo>,
-    _now: SystemTime,
-) -> Vec<RunnerRow> {
+pub fn join(resources: Vec<RunnerResource>, jobs: &HashMap<u32, JobInfo>) -> Vec<RunnerRow> {
     let mut rows: Vec<RunnerRow> = resources
         .into_iter()
         .map(|r| {
@@ -101,11 +97,7 @@ mod tests {
 
     #[test]
     fn no_job_is_idle() {
-        let rows = join(
-            vec![res("pulse-ci-runner-1", 100)],
-            &HashMap::new(),
-            SystemTime::now(),
-        );
+        let rows = join(vec![res("pulse-ci-runner-1", 100)], &HashMap::new());
         assert!(matches!(rows[0].load, Load::Idle));
         assert!(rows[0].job.is_none());
     }
@@ -122,7 +114,7 @@ mod tests {
                 started_at: now - Duration::from_secs(30),
             },
         );
-        let rows = join(vec![res("pulse-ci-runner-1", 100)], &jobs, now);
+        let rows = join(vec![res("pulse-ci-runner-1", 100)], &jobs);
         assert!(matches!(rows[0].load, Load::Busy));
         assert_eq!(
             elapsed_secs(rows[0].job.as_ref().unwrap().started_at, now),
@@ -136,7 +128,6 @@ mod tests {
         let rows = join(
             vec![res("pulse-ci-runner-1", (cap as f64 * 0.95) as u64)],
             &HashMap::new(),
-            SystemTime::now(),
         );
         assert!(matches!(rows[0].load, Load::NearCap));
     }
@@ -146,7 +137,6 @@ mod tests {
         let rows = join(
             vec![res("pulse-ci-runner-3", 300), res("pulse-ci-runner-1", 100)],
             &HashMap::new(),
-            SystemTime::now(),
         );
         assert_eq!(rows[0].name, "pulse-ci-runner-1");
         assert_eq!(slice_total_bytes(&rows), 400);

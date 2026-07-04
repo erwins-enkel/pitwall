@@ -13,9 +13,10 @@ v1 covers the 6 ephemeral docker "pulse" runners on a single self-hosted CI host
 
 - **Language/stack:** Rust + ratatui + crossterm, async on tokio. Single static
   binary installed to `~/.local/bin/pitwall`.
-- **Docker stats:** `bollard`, streaming over the rootless socket
-  (`unix:///run/user/1000/docker.sock`). No polling subprocess; CPU%/mem computed
-  from consecutive cgroup samples.
+- **Docker stats:** `bollard`, one-shot stats poll (~2s) over the rootless socket
+  (`unix:///run/user/1000/docker.sock`). No subprocess and no persistent stats
+  connection; CPU%/mem computed in-process from consecutive cgroup samples (the
+  prior sample is retained per container to delta against).
 - **Jobs:** shell out to the host-authenticated `gh` CLI (no in-Rust GitHub auth).
 - **Runner scope (v1):** pulse docker runners only, single repo. A resource-source
   abstraction is carried so native (non-docker) runners can be added later without
@@ -25,7 +26,7 @@ v1 covers the 6 ephemeral docker "pulse" runners on a single self-hosted CI host
 ## Architecture
 
 ```
- ┌─ resource source (bollard, streaming) ─┐
+ ┌─ resource source (bollard, ~2s poll) ──┐
  │   pulse-ci-runner-* → cpu%, mem        ├─► AppState ─► ui (table + slice gauge)
  ┌─ jobs source (gh shell-out, 15s) ──────┘        ▲
  │   in_progress runs → runner_name→job            └── key events (q quit)
@@ -37,9 +38,10 @@ Two independent background tasks own all I/O and push updates into a shared
 
 ## Components (each independently testable)
 
-1. **`resource`** — bollard connects to the rootless docker socket, streams stats
-   for containers whose name starts with `pulse-ci-runner-`. Computes CPU% and mem
-   usage/limit from consecutive samples. Emits
+1. **`resource`** — bollard connects to the rootless docker socket and one-shot polls
+   stats (~2s) for containers whose name starts with `pulse-ci-runner-`. Computes CPU%
+   and mem usage/limit from consecutive samples (retaining the prior sample per
+   container to delta against). Emits
    `RunnerResource { name, cpu_pct, mem_bytes, mem_limit }`.
    This module is the abstraction seam: it exposes a source trait/enum so a future
    `proc` source (native `Runner.Listener` processes) is purely additive. v1 ships
@@ -60,7 +62,7 @@ Two independent background tasks own all I/O and push updates into a shared
 
 ## Data flow & cadence
 
-- Docker stats: continuous stream (~1 sample/s per container).
+- Docker stats: one-shot poll every ~2s per container.
 - Jobs: polled every 15s (rate-limit safe).
 - UI: redraw on tick (~1s) or when new data arrives.
 

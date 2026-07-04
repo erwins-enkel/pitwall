@@ -18,10 +18,11 @@ pub struct View<'a> {
 
 pub fn fmt_mem(bytes: u64) -> String {
     let bytes = bytes as f64;
-    if bytes >= GIB {
+    let mib = format!("{:.1}", bytes / MIB);
+    if bytes >= GIB || mib == "1024.0" {
         format!("{:.1}GiB", bytes / GIB)
     } else {
-        format!("{:.1}MiB", bytes / MIB)
+        format!("{mib}MiB")
     }
 }
 
@@ -160,6 +161,7 @@ mod tests {
     #[test]
     fn formats_mem_and_elapsed() {
         assert_eq!(fmt_mem(1024 * 1024 * 1024), "1.0GiB");
+        assert_eq!(fmt_mem(1024 * 1024 * 1024 - 1), "1.0GiB"); // boundary: don't print 1024.0MiB
         assert_eq!(fmt_mem(42 * 1024 * 1024), "42.0MiB");
         assert_eq!(fmt_elapsed(75), "01:15");
         assert_eq!(fmt_elapsed(3661), "1:01:01");
