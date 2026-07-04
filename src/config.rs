@@ -13,10 +13,7 @@ impl Config {
                 .ok()
                 .map(|h| h.trim_start_matches("unix://").to_string())
                 .unwrap_or_else(|| {
-                    let uid = std::env::var("UID")
-                        .ok()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(1000);
+                    let uid = unsafe { libc::getuid() };
                     format!("/run/user/{uid}/docker.sock")
                 })
         });
@@ -47,5 +44,16 @@ mod tests {
         assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
         assert_eq!(c.repo, "erwins-enkel/pulse");
         assert_eq!(c.prefix, "pulse-ci-runner-");
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_real_uid() {
+        std::env::remove_var("PITWALL_SOCKET");
+        std::env::remove_var("DOCKER_HOST");
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(
+            Config::from_env().socket_path,
+            format!("/run/user/{uid}/docker.sock")
+        );
     }
 }
