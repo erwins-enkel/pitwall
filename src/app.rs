@@ -36,6 +36,8 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal) -> anyhow::Result<()> {
     let mut state = AppState::default();
     let mut events = EventStream::new();
     let mut ticker = interval(Duration::from_secs(1));
+    let mut res_alive = true;
+    let mut jobs_alive = true;
 
     draw(&mut terminal, &state, slice_cap_bytes)?;
 
@@ -49,17 +51,36 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal) -> anyhow::Result<()> {
                     None => return Ok(()), // input stream closed
                 }
             }
-            Some(update) = rx_res.recv() => {
-                state.resources = update.resources;
-                state.resource_err = update.error;
-            }
-            Some(update) = rx_jobs.recv() => {
-                state.jobs = update.jobs;
-                state.jobs_err = update.error;
-            }
+            res = rx_res.recv(), if res_alive => match res {
+                Some(update) => apply_resource_update(&mut state, update),
+                None => res_alive = false,
+            },
+            jobs = rx_jobs.recv(), if jobs_alive => match jobs {
+                Some(update) => apply_jobs_update(&mut state, update),
+                None => jobs_alive = false,
+            },
             _ = ticker.tick() => {}
         }
         draw(&mut terminal, &state, slice_cap_bytes)?;
+    }
+}
+
+/// Applies a resource poll result: the error banner always reflects the
+/// latest poll, but the data table only replaces on success (`error: None`)
+/// so a transient failure never wipes last-known-good rows.
+fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
+    state.resource_err = update.error;
+    if state.resource_err.is_none() {
+        state.resources = update.resources;
+    }
+}
+
+/// Applies a jobs poll result with the same error-preserves-data semantics
+/// as `apply_resource_update`.
+fn apply_jobs_update(state: &mut AppState, update: JobsUpdate) {
+    state.jobs_err = update.error;
+    if state.jobs_err.is_none() {
+        state.jobs = update.jobs;
     }
 }
 
@@ -94,4 +115,112 @@ fn draw(
         );
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resource(name: &str) -> RunnerResource {
+        RunnerResource {
+            name: name.into(),
+            cpu_pct: 1.0,
+            mem_bytes: 100,
+            mem_limit: 8 * 1024 * 1024 * 1024,
+        }
+    }
+
+    fn job() -> JobInfo {
+        JobInfo {
+            workflow: "ci".into(),
+            job: "test".into(),
+            started_at: SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn resource_error_preserves_last_known() {
+        let mut state = AppState {
+            resources: vec![resource("pulse-ci-runner-1"), resource("pulse-ci-runner-2")],
+            ..Default::default()
+        };
+
+        apply_resource_update(
+            &mut state,
+            ResourceUpdate {
+                resources: vec![],
+                error: Some("docker: x".to_string()),
+            },
+        );
+
+        assert_eq!(state.resources.len(), 2);
+        assert_eq!(state.resource_err, Some("docker: x".to_string()));
+    }
+
+    #[test]
+    fn resource_success_replaces() {
+        let mut state = AppState {
+            resources: vec![resource("pulse-ci-runner-1"), resource("pulse-ci-runner-2")],
+            resource_err: Some("stale error".to_string()),
+            ..Default::default()
+        };
+
+        apply_resource_update(
+            &mut state,
+            ResourceUpdate {
+                resources: vec![resource("pulse-ci-runner-1")],
+                error: None,
+            },
+        );
+
+        assert_eq!(state.resources.len(), 1);
+        assert!(state.resource_err.is_none());
+    }
+
+    #[test]
+    fn jobs_error_preserves_last_known() {
+        let mut jobs = HashMap::new();
+        jobs.insert(1u32, job());
+        let mut state = AppState {
+            jobs,
+            ..Default::default()
+        };
+
+        apply_jobs_update(
+            &mut state,
+            JobsUpdate {
+                jobs: HashMap::new(),
+                error: Some("gh: x".to_string()),
+            },
+        );
+
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs_err, Some("gh: x".to_string()));
+    }
+
+    #[test]
+    fn jobs_success_replaces() {
+        let mut stale = HashMap::new();
+        stale.insert(1u32, job());
+        let mut state = AppState {
+            jobs: stale,
+            jobs_err: Some("stale error".to_string()),
+            ..Default::default()
+        };
+
+        let mut fresh = HashMap::new();
+        fresh.insert(2u32, job());
+
+        apply_jobs_update(
+            &mut state,
+            JobsUpdate {
+                jobs: fresh,
+                error: None,
+            },
+        );
+
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs.contains_key(&2));
+        assert!(state.jobs_err.is_none());
+    }
 }
