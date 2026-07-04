@@ -18,7 +18,7 @@ A table, one row per runner:
 - **workflow › job** — `— idle` when no in-progress job is joined, else `Workflow Name › Job Name`.
 - **elapsed** — ticking duration since the job started; `-` when idle.
 
-Rows are colored by load using the Catppuccin palette over a full Catppuccin background: muted gray = idle, green = busy, red = near-cap (mem ≥ 90% of container limit). A teal gauge at the bottom shows summed runner memory against a configurable slice cap. Pick a flavor with `PITWALL_THEME` (see [Configuration](#configuration)). Colors assume a truecolor terminal; on 16/256-color terminals they downsample to the nearest available color.
+Rows are colored by load using the Catppuccin palette over a full Catppuccin background: muted gray = idle, green = busy, red = near-cap (mem ≥ crit % of the container limit — the whole row goes red). As an early warning *below* near-cap, the `mem` cell alone turns the warn color (yellow) while its memory is in the warn band (≥ warn %, < crit %), so a busy runner stays green with just a yellow mem cell. The gauge at the bottom shows summed runner memory against a configurable slice cap, using the same thresholds: teal normally, yellow (` ⚠ warn`) in the warn band, red (` ⚠ NEAR CAP`) at the cap. Pick a flavor with `PITWALL_THEME` (see [Configuration](#configuration)). Colors assume a truecolor terminal; on 16/256-color terminals they downsample to the nearest available color.
 
 ## Requirements
 
@@ -62,9 +62,14 @@ config file → built-in default**.
 | prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` (must match your runner container names, e.g. `pulse-ci-runner-`) |
 | slice cap (GiB) | `PITWALL_SLICE_CAP_GIB` | `slice_cap_gib` | `24` |
 | theme | `PITWALL_THEME` | `theme` | `mocha` — Catppuccin flavor: `mocha`, `macchiato`, `frappe`, or `latte` (light). Unknown values fall back to `mocha`. |
+| mem warn % | `PITWALL_MEM_WARN_PCT` | — | `85` (warn tier: yellow mem cell / gauge) |
+| mem crit % | `PITWALL_MEM_CRIT_PCT` | — | `90` (critical tier: red row / gauge) |
 
 An empty env var (e.g. `PITWALL_REPO=`) is treated as unset, falling through to
 the file value, then the default.
+
+Both memory percents are clamped to `0..=100`; if warn exceeds crit it is pinned
+down to crit so the tiers can't invert.
 
 ### Config file
 

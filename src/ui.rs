@@ -1,4 +1,4 @@
-use crate::model::{elapsed_secs, slice_total_bytes, Load, RunnerRow};
+use crate::model::{elapsed_secs, mem_level, slice_total_bytes, Load, MemLevel, RunnerRow};
 use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -32,6 +32,8 @@ pub struct View<'a> {
     /// Running containers NOT matching the prefix last poll. Drives the
     /// prefix-mismatch hint when nothing matched.
     pub unmatched_seen: usize,
+    pub warn_ratio: f64,
+    pub crit_ratio: f64,
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -101,6 +103,15 @@ fn table_row(row: &RunnerRow, now: SystemTime, p: &Palette) -> Row<'static> {
     let cpu_spark = spark(&row.cpu_hist, cpu_max, SPARK_WIDTH);
     let mem = format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit));
     let mem_spark = spark(&row.mem_hist, 1.0, SPARK_WIDTH);
+    // Warn memory pressure is signalled on the mem cell alone (warn color),
+    // overriding the row's job-state color for that one cell so a busy runner
+    // stays green. Critical is handled by the whole-row NearCap style. The base
+    // background is kept so the cell matches the themed row.
+    let mem_cell = if row.mem_level == MemLevel::Warn {
+        Cell::from(mem).style(Style::new().fg(p.warn).bg(p.base))
+    } else {
+        Cell::from(mem)
+    };
     let (job, branch, elapsed) = match &row.job {
         Some(j) => {
             let branch = if j.branch.is_empty() {
@@ -124,7 +135,7 @@ fn table_row(row: &RunnerRow, now: SystemTime, p: &Palette) -> Row<'static> {
         Cell::from(row.name.clone()),
         Cell::from(cpu),
         Cell::from(cpu_spark),
-        Cell::from(mem),
+        mem_cell,
         Cell::from(mem_spark),
         Cell::from(job),
         Cell::from(branch),
@@ -207,13 +218,26 @@ fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
         0.0
     };
     let cap_gib = (view.slice_cap_bytes as f64 / GIB).round() as u64;
-    let label = format!("{:.1} / {} GiB", total as f64 / GIB, cap_gib);
     let p = view.palette;
+    // Same classifier as the per-runner mem cells, mapped onto themed roles:
+    // gauge (normal) / warn / near_cap. A text marker keeps the alert from being
+    // color-only.
+    let (fill, marker) = match mem_level(
+        total,
+        view.slice_cap_bytes,
+        view.warn_ratio,
+        view.crit_ratio,
+    ) {
+        MemLevel::Normal => (p.gauge, ""),
+        MemLevel::Warn => (p.warn, " \u{26a0} warn"),
+        MemLevel::Critical => (p.near_cap, " \u{26a0} NEAR CAP"),
+    };
+    let label = format!("{:.1} / {} GiB{}", total as f64 / GIB, cap_gib, marker);
     let gauge = Gauge::default()
         .ratio(ratio)
         .label(label)
         .style(Style::new().bg(p.base))
-        .gauge_style(Style::new().fg(p.gauge).bg(p.base));
+        .gauge_style(Style::new().fg(fill).bg(p.base));
     frame.render_widget(gauge, area);
 }
 
@@ -266,11 +290,71 @@ pub fn render(frame: &mut Frame, view: &View) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Load, RunnerRow};
-    use crate::theme::Flavor;
+    use crate::model::{Load, MemLevel, RunnerRow};
+    use crate::theme::{Flavor, Palette};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use std::time::SystemTime;
+
+    const CAP: u64 = 8 * 1024 * 1024 * 1024;
+
+    fn row(mem_bytes: u64, load: Load, mem_level: MemLevel) -> RunnerRow {
+        RunnerRow {
+            name: "ci-runner-1".into(),
+            cpu_pct: 0.5,
+            mem_bytes,
+            mem_limit: CAP,
+            job: None,
+            load,
+            mem_level,
+            cpu_hist: vec![],
+            mem_hist: vec![],
+        }
+    }
+
+    fn draw(rows: &[RunnerRow], slice_cap_bytes: u64) -> Terminal<TestBackend> {
+        // 140 wide so the two 20-col sparkline columns plus the flexible
+        // job/branch columns all stay visible for the asserts.
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows,
+                    slice_cap_bytes,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                },
+            );
+        })
+        .unwrap();
+        term
+    }
+
+    fn text(term: &Terminal<TestBackend>) -> String {
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn has_fg(term: &Terminal<TestBackend>, color: Color) -> bool {
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|c| c.fg == color)
+    }
 
     #[test]
     fn idle_dims_on_dark_but_not_on_light() {
@@ -318,6 +402,7 @@ mod tests {
                 mem_limit: 8 * 1024 * 1024 * 1024,
                 job: None,
                 load: Load::Idle,
+                mem_level: MemLevel::Normal,
                 cpu_hist: vec![],
                 mem_hist: vec![],
             },
@@ -333,37 +418,13 @@ mod tests {
                     started_at: SystemTime::now(),
                 }),
                 load: Load::Busy,
+                mem_level: MemLevel::Normal,
                 cpu_hist: vec![],
                 mem_hist: vec![],
             },
         ];
-        // 140 wide: the two 20-wide spark columns plus the flexible job/branch
-        // columns need the extra room to keep every column visible for the asserts.
-        let palette = Palette::for_flavor(Flavor::Mocha);
-        let mut term = Terminal::new(TestBackend::new(140, 12)).unwrap();
-        term.draw(|f| {
-            render(
-                f,
-                &View {
-                    rows: &rows,
-                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
-                    now: SystemTime::now(),
-                    status: None,
-                    palette: &palette,
-                    prefix: "ci-runner-",
-                    matched_seen: rows.len(),
-                    unmatched_seen: 0,
-                },
-            );
-        })
-        .unwrap();
-        let content = term
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect::<String>();
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        let content = text(&term);
         assert!(content.contains("ci-runner-1"));
         assert!(content.contains("idle"));
         assert!(content.contains("branch"));
@@ -396,6 +457,8 @@ mod tests {
                         prefix: "ci-runner-",
                         matched_seen: 0,
                         unmatched_seen: 0,
+                        warn_ratio: 0.85,
+                        crit_ratio: 0.90,
                     },
                 );
             })
@@ -424,18 +487,83 @@ mod tests {
                     prefix: "ci-runner-",
                     matched_seen: 0,
                     unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
                 },
             );
         })
         .unwrap();
-        let content = term
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect::<String>();
-        assert!(content.contains("docker: unreachable"));
+        assert!(text(&term).contains("docker: unreachable"));
+    }
+
+    #[test]
+    fn warn_band_busy_row_stays_green_but_mem_cell_is_warn_color() {
+        // Two channels: the row is busy (green) while the mem cell alone is the
+        // warn color — the warn signal does not swallow the healthy-busy color.
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let rows = vec![row((CAP as f64 * 0.87) as u64, Load::Busy, MemLevel::Warn)];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        assert!(has_fg(&term, m.busy), "busy row should use the busy color");
+        assert!(
+            has_fg(&term, m.warn),
+            "warn mem cell should use the warn color"
+        );
+    }
+
+    #[test]
+    fn critical_row_is_near_cap_color() {
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let rows = vec![row(
+            (CAP as f64 * 0.95) as u64,
+            Load::NearCap,
+            MemLevel::Critical,
+        )];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        assert!(
+            has_fg(&term, m.near_cap),
+            "critical row should use the near_cap color"
+        );
+    }
+
+    #[test]
+    fn gauge_is_normal_color_and_unmarked_when_normal() {
+        // Slice total well below warn: 1 GiB of a 24 GiB cap.
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let rows = vec![row(1024 * 1024 * 1024, Load::Busy, MemLevel::Normal)];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        assert!(has_fg(&term, m.gauge), "gauge should use the normal color");
+        let content = text(&term);
+        assert!(!content.contains("warn"));
+        assert!(!content.contains("NEAR CAP"));
+    }
+
+    #[test]
+    fn gauge_warn_color_with_marker_in_warn_band() {
+        // Slice total 87% of a 4 GiB cap → warn band.
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let cap = 4 * 1024 * 1024 * 1024;
+        let rows = vec![row((cap as f64 * 0.87) as u64, Load::Busy, MemLevel::Warn)];
+        let term = draw(&rows, cap);
+        assert!(has_fg(&term, m.warn), "gauge should use the warn color");
+        assert!(text(&term).contains("\u{26a0} warn"));
+    }
+
+    #[test]
+    fn gauge_red_with_marker_when_critical() {
+        // Slice total 95% of a 4 GiB cap → critical.
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let cap = 4 * 1024 * 1024 * 1024;
+        let rows = vec![row(
+            (cap as f64 * 0.95) as u64,
+            Load::NearCap,
+            MemLevel::Critical,
+        )];
+        let term = draw(&rows, cap);
+        assert!(
+            has_fg(&term, m.near_cap),
+            "gauge should use the near_cap color"
+        );
+        assert!(text(&term).contains("\u{26a0} NEAR CAP"));
     }
 
     #[test]
@@ -454,6 +582,8 @@ mod tests {
                     prefix: "ci-runner-",
                     matched_seen: 0,
                     unmatched_seen: 6,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
                 },
             );
         })
@@ -487,6 +617,8 @@ mod tests {
                     prefix: "ci-runner-",
                     matched_seen: 3,
                     unmatched_seen: 2,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
                 },
             );
         })

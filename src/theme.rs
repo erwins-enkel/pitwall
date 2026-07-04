@@ -37,6 +37,8 @@ pub struct Palette {
     pub idle: Color,
     /// Busy rows.
     pub busy: Color,
+    /// Memory warn tier (approaching the cap): mem cell / gauge below near_cap.
+    pub warn: Color,
     /// Near memory-cap rows.
     pub near_cap: Color,
     /// Memory gauge fill.
@@ -53,8 +55,8 @@ pub struct Palette {
 impl Palette {
     /// Build the palette for a flavor from its official Catppuccin hex values
     /// (see https://catppuccin.com/palette). Role mapping: base=base,
-    /// text=text, idle=overlay0, busy=green, near_cap/error=red, gauge=teal,
-    /// accent=mauve.
+    /// text=text, idle=overlay0, busy=green, warn=yellow, near_cap/error=red,
+    /// gauge=teal, accent=mauve.
     pub fn for_flavor(flavor: Flavor) -> Palette {
         match flavor {
             Flavor::Mocha => Palette {
@@ -62,6 +64,7 @@ impl Palette {
                 text: Color::Rgb(205, 214, 244),     // #cdd6f4
                 idle: Color::Rgb(108, 112, 134),     // #6c7086 overlay0
                 busy: Color::Rgb(166, 227, 161),     // #a6e3a1 green
+                warn: Color::Rgb(249, 226, 175),     // #f9e2af yellow
                 near_cap: Color::Rgb(243, 139, 168), // #f38ba8 red
                 gauge: Color::Rgb(148, 226, 213),    // #94e2d5 teal
                 error: Color::Rgb(243, 139, 168),    // #f38ba8 red
@@ -73,6 +76,7 @@ impl Palette {
                 text: Color::Rgb(202, 211, 245),     // #cad3f5
                 idle: Color::Rgb(110, 115, 141),     // #6e738d overlay0
                 busy: Color::Rgb(166, 218, 149),     // #a6da95 green
+                warn: Color::Rgb(238, 212, 159),     // #eed49f yellow
                 near_cap: Color::Rgb(237, 135, 150), // #ed8796 red
                 gauge: Color::Rgb(139, 213, 202),    // #8bd5ca teal
                 error: Color::Rgb(237, 135, 150),    // #ed8796 red
@@ -84,6 +88,7 @@ impl Palette {
                 text: Color::Rgb(198, 208, 245),     // #c6d0f5
                 idle: Color::Rgb(115, 121, 148),     // #737994 overlay0
                 busy: Color::Rgb(166, 209, 137),     // #a6d189 green
+                warn: Color::Rgb(229, 200, 144),     // #e5c890 yellow
                 near_cap: Color::Rgb(231, 130, 132), // #e78284 red
                 gauge: Color::Rgb(129, 200, 190),    // #81c8be teal
                 error: Color::Rgb(231, 130, 132),    // #e78284 red
@@ -95,6 +100,7 @@ impl Palette {
                 text: Color::Rgb(76, 79, 105),     // #4c4f69
                 idle: Color::Rgb(156, 160, 176),   // #9ca0b0 overlay0
                 busy: Color::Rgb(64, 160, 43),     // #40a02b green
+                warn: Color::Rgb(223, 142, 29),    // #df8e1d yellow
                 near_cap: Color::Rgb(210, 15, 57), // #d20f39 red
                 gauge: Color::Rgb(23, 146, 153),   // #179299 teal
                 error: Color::Rgb(210, 15, 57),    // #d20f39 red

@@ -35,6 +35,8 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
     let slice_cap_bytes = cfg.slice_cap_bytes;
     let palette = Palette::for_flavor(cfg.flavor);
     let prefix = cfg.prefix.clone();
+    let warn_ratio = cfg.warn_ratio;
+    let crit_ratio = cfg.crit_ratio;
 
     let (tx_res, mut rx_res) = mpsc::channel::<ResourceUpdate>(8);
     let (tx_jobs, mut rx_jobs) = mpsc::channel::<JobsUpdate>(8);
@@ -48,7 +50,15 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
     let mut res_alive = true;
     let mut jobs_alive = true;
 
-    draw(&mut terminal, &state, slice_cap_bytes, &palette, &prefix)?;
+    draw(
+        &mut terminal,
+        &state,
+        slice_cap_bytes,
+        &palette,
+        &prefix,
+        warn_ratio,
+        crit_ratio,
+    )?;
 
     loop {
         tokio::select! {
@@ -70,7 +80,15 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
             },
             _ = ticker.tick() => {}
         }
-        draw(&mut terminal, &state, slice_cap_bytes, &palette, &prefix)?;
+        draw(
+            &mut terminal,
+            &state,
+            slice_cap_bytes,
+            &palette,
+            &prefix,
+            warn_ratio,
+            crit_ratio,
+        )?;
     }
 }
 
@@ -112,13 +130,21 @@ fn draw(
     slice_cap_bytes: u64,
     palette: &Palette,
     prefix: &str,
+    warn_ratio: f64,
+    crit_ratio: f64,
 ) -> anyhow::Result<()> {
     // Docker errors take precedence over gh errors when both are present.
     let status = state
         .resource_err
         .clone()
         .or_else(|| state.jobs_err.clone());
-    let rows = join(state.resources.clone(), &state.jobs, &state.history);
+    let rows = join(
+        state.resources.clone(),
+        &state.jobs,
+        &state.history,
+        warn_ratio,
+        crit_ratio,
+    );
     terminal.draw(|f| {
         ui::render(
             f,
@@ -131,6 +157,8 @@ fn draw(
                 prefix,
                 matched_seen: state.matched_seen,
                 unmatched_seen: state.unmatched_seen,
+                warn_ratio,
+                crit_ratio,
             },
         );
     })?;

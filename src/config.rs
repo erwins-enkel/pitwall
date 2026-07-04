@@ -17,6 +17,29 @@ pub struct Config {
     pub prefix: String,
     pub slice_cap_bytes: u64,
     pub flavor: Flavor,
+    pub warn_ratio: f64,
+    pub crit_ratio: f64,
+}
+
+const DEFAULT_WARN_PCT: u64 = 85;
+const DEFAULT_CRIT_PCT: u64 = 90;
+
+/// Parse a memory-threshold env value as an integer percent, clamped to
+/// `0..=100`. A missing or non-numeric value falls back to `default`.
+fn parse_pct(raw: Option<&str>, default: u64) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+        .min(100)
+}
+
+/// Resolve the warn/critical memory thresholds (as fractions `0.0..=1.0`) from
+/// their raw env values. Pure — takes the raw strings as arguments so it can be
+/// unit-tested without touching process-wide env. `warn` is pinned to `crit`
+/// when it would otherwise exceed it, so the two tiers can never invert.
+fn resolve_thresholds(warn_raw: Option<&str>, crit_raw: Option<&str>) -> (f64, f64) {
+    let crit = parse_pct(crit_raw, DEFAULT_CRIT_PCT);
+    let warn = parse_pct(warn_raw, DEFAULT_WARN_PCT).min(crit);
+    (warn as f64 / 100.0, crit as f64 / 100.0)
 }
 
 /// Optional settings parsed from the TOML config file. Every field is optional:
@@ -145,12 +168,19 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
             .as_str(),
     );
 
+    let (warn_ratio, crit_ratio) = resolve_thresholds(
+        env_nonempty(get, "PITWALL_MEM_WARN_PCT").as_deref(),
+        env_nonempty(get, "PITWALL_MEM_CRIT_PCT").as_deref(),
+    );
+
     Config {
         socket_path,
         repo,
         prefix,
         slice_cap_bytes: cap_gib.saturating_mul(GIB),
         flavor,
+        warn_ratio,
+        crit_ratio,
     }
 }
 
@@ -182,6 +212,44 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pitwall-cfgtest-{}-{name}", std::process::id()))
+    }
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    // ---- resolve_thresholds() -------------------------------------------
+
+    #[test]
+    fn thresholds_default_when_unset() {
+        let (w, c) = resolve_thresholds(None, None);
+        assert!(approx(w, 0.85), "warn {w}");
+        assert!(approx(c, 0.90), "crit {c}");
+    }
+
+    #[test]
+    fn thresholds_clamp_over_100() {
+        let (w, c) = resolve_thresholds(Some("150"), Some("200"));
+        assert!(approx(w, 1.0) && approx(c, 1.0));
+    }
+
+    #[test]
+    fn thresholds_non_numeric_falls_back_to_default() {
+        let (w, c) = resolve_thresholds(Some("abc"), Some("xyz"));
+        assert!(approx(w, 0.85) && approx(c, 0.90));
+    }
+
+    #[test]
+    fn thresholds_warn_pinned_to_crit_when_inverted() {
+        // warn > crit must not invert: warn is pinned down to crit.
+        let (w, c) = resolve_thresholds(Some("95"), Some("80"));
+        assert!(approx(w, 0.80) && approx(c, 0.80));
+    }
+
+    #[test]
+    fn thresholds_degenerate_crit_zero_pins_warn_zero() {
+        let (w, c) = resolve_thresholds(Some("50"), Some("0"));
+        assert!(approx(w, 0.0) && approx(c, 0.0));
     }
 
     // ---- resolve() -------------------------------------------------------
