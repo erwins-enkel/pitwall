@@ -1,0 +1,29 @@
+# pitwall config — copy to ~/.config/pitwall/config.toml (or point PITWALL_CONFIG
+# at it) and edit. Every key below is optional and resolved env → file → default
+# (first wins); an env var always overrides the matching file key. Unknown keys
+# are a hard error, so only the keys shown here are valid.
+
+# The one key you must set: your self-hosted runners' repo (owner/repo). Leaving
+# it at pitwall's built-in "owner/repo" sentinel polls nothing and shows a "set
+# PITWALL_REPO" hint, so set it here (or via PITWALL_REPO).
+repo = "your-org/your-repo"
+
+# Rootless Docker socket. Default: $DOCKER_HOST (unix:// stripped) if set, else
+# /run/user/$UID/docker.sock. TOML does no $UID expansion — if you uncomment
+# this, replace $UID with your numeric UID (`id -u`). Left commented, pitwall
+# auto-detects it.
+# socket = "/run/user/$UID/docker.sock"
+
+# Runner container-name prefix to match (e.g. "pulse-ci-runner-"). Default below.
+# prefix = "ci-runner-"
+
+# Docker (pulse-slice) memory gauge cap, in GiB. Default below.
+# slice_cap_gib = 24
+
+# Catppuccin flavor: mocha, macchiato, frappe, or latte (light). Unknown values
+# fall back to mocha. Default below.
+# theme = "mocha"
+
+# Note: the memory warn/critical percents are env-only — set PITWALL_MEM_WARN_PCT
+# (default 85) and PITWALL_MEM_CRIT_PCT (default 90). They have no config-file key;
+# adding one here would be an unknown-key error.

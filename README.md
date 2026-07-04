@@ -96,12 +96,17 @@ point elsewhere. All keys are optional:
 
 ```toml
 # ~/.config/pitwall/config.toml
-socket        = "/run/user/1000/docker.sock"
-repo          = "owner/repo"
+repo          = "your-org/your-repo"           # required: your runners' repo
+socket        = "/run/user/1000/docker.sock"   # 1000 = your numeric UID (`id -u`)
 prefix        = "ci-runner-"
 slice_cap_gib = 24
 theme         = "mocha"
 ```
+
+A ready-to-copy, fully-commented version lives at
+[`config.example.toml`](config.example.toml) in the repo root —
+`cp config.example.toml ~/.config/pitwall/config.toml` and uncomment what you
+need.
 
 Notes:
 
