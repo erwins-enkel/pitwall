@@ -19,6 +19,11 @@ struct AppState {
     history: History,
     resource_err: Option<String>,
     jobs_err: Option<String>,
+    /// From the last successful resource poll: containers whose name matched the
+    /// prefix, and those that didn't. The empty state distinguishes "matched but
+    /// stats pending" from "nothing matched the prefix".
+    matched_seen: usize,
+    unmatched_seen: usize,
 }
 
 /// Runs the pitwall event loop: spawns the resource/jobs pollers, then drives a
@@ -29,6 +34,7 @@ struct AppState {
 pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow::Result<()> {
     let slice_cap_bytes = cfg.slice_cap_bytes;
     let palette = Palette::for_flavor(cfg.flavor);
+    let prefix = cfg.prefix.clone();
 
     let (tx_res, mut rx_res) = mpsc::channel::<ResourceUpdate>(8);
     let (tx_jobs, mut rx_jobs) = mpsc::channel::<JobsUpdate>(8);
@@ -42,7 +48,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
     let mut res_alive = true;
     let mut jobs_alive = true;
 
-    draw(&mut terminal, &state, slice_cap_bytes, &palette)?;
+    draw(&mut terminal, &state, slice_cap_bytes, &palette, &prefix)?;
 
     loop {
         tokio::select! {
@@ -64,7 +70,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
             },
             _ = ticker.tick() => {}
         }
-        draw(&mut terminal, &state, slice_cap_bytes, &palette)?;
+        draw(&mut terminal, &state, slice_cap_bytes, &palette, &prefix)?;
     }
 }
 
@@ -78,6 +84,8 @@ fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
         // Sample rides the 2s poll cadence and only on success, so a transient
         // failure neither appends a bogus point nor drops history.
         state.history.record(&state.resources);
+        state.matched_seen = update.matched_seen;
+        state.unmatched_seen = update.unmatched_seen;
     }
 }
 
@@ -103,6 +111,7 @@ fn draw(
     state: &AppState,
     slice_cap_bytes: u64,
     palette: &Palette,
+    prefix: &str,
 ) -> anyhow::Result<()> {
     // Docker errors take precedence over gh errors when both are present.
     let status = state
@@ -119,6 +128,9 @@ fn draw(
                 now: SystemTime::now(),
                 status,
                 palette,
+                prefix,
+                matched_seen: state.matched_seen,
+                unmatched_seen: state.unmatched_seen,
             },
         );
     })?;
@@ -158,6 +170,8 @@ mod tests {
             &mut state,
             ResourceUpdate {
                 resources: vec![],
+                matched_seen: 0,
+                unmatched_seen: 0,
                 error: Some("docker: x".to_string()),
             },
         );
@@ -178,6 +192,8 @@ mod tests {
             &mut state,
             ResourceUpdate {
                 resources: vec![resource("ci-runner-1")],
+                matched_seen: 1,
+                unmatched_seen: 0,
                 error: None,
             },
         );
@@ -193,6 +209,8 @@ mod tests {
             &mut state,
             ResourceUpdate {
                 resources: vec![resource("pulse-ci-runner-1")],
+                matched_seen: 1,
+                unmatched_seen: 0,
                 error: None,
             },
         );
@@ -206,6 +224,8 @@ mod tests {
             &mut state,
             ResourceUpdate {
                 resources: vec![resource("pulse-ci-runner-1")],
+                matched_seen: 1,
+                unmatched_seen: 0,
                 error: None,
             },
         );
@@ -213,6 +233,8 @@ mod tests {
             &mut state,
             ResourceUpdate {
                 resources: vec![],
+                matched_seen: 0,
+                unmatched_seen: 0,
                 error: Some("docker: x".to_string()),
             },
         );

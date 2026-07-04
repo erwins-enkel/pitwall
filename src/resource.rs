@@ -16,6 +16,13 @@ pub struct CpuSample {
 
 pub struct ResourceUpdate {
     pub resources: Vec<RunnerResource>,
+    /// Running containers whose name matched the prefix this poll. Non-zero with
+    /// empty `resources` means matches exist but their stats weren't ready —
+    /// distinct from a prefix mismatch.
+    pub matched_seen: usize,
+    /// Running containers whose name did NOT match the prefix. Drives the
+    /// "N running, none match the prefix" hint when nothing matched.
+    pub unmatched_seen: usize,
     pub error: Option<String>,
 }
 
@@ -51,6 +58,8 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>) {
                     let _ = tx
                         .send(ResourceUpdate {
                             resources: vec![],
+                            matched_seen: 0,
+                            unmatched_seen: 0,
                             error: Some(format!("docker: {e}")),
                         })
                         .await;
@@ -61,10 +70,12 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>) {
         }
         let d = docker.as_ref().unwrap();
         match collect(d, &cfg.prefix, &mut prev).await {
-            Ok(resources) => {
+            Ok((resources, matched_seen, unmatched_seen)) => {
                 let _ = tx
                     .send(ResourceUpdate {
                         resources,
+                        matched_seen,
+                        unmatched_seen,
                         error: None,
                     })
                     .await;
@@ -74,6 +85,8 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>) {
                 let _ = tx
                     .send(ResourceUpdate {
                         resources: vec![],
+                        matched_seen: 0,
+                        unmatched_seen: 0,
                         error: Some(format!("docker: {e}")),
                     })
                     .await;
@@ -87,10 +100,12 @@ async fn collect(
     d: &Docker,
     prefix: &str,
     prev: &mut HashMap<String, CpuSample>,
-) -> anyhow::Result<Vec<RunnerResource>> {
+) -> anyhow::Result<(Vec<RunnerResource>, usize, usize)> {
     let list = d
         .list_containers(Some(ListContainersOptionsBuilder::default().build()))
         .await?;
+    let total_seen = list.len();
+    let mut matched_seen = 0;
     let mut out = Vec::new();
     let mut seen = Vec::new();
     for c in list {
@@ -103,6 +118,7 @@ async fn collect(
         if !container_matches(&name, prefix) {
             continue;
         }
+        matched_seen += 1;
         let id = match &c.id {
             Some(id) => id.clone(),
             None => continue,
@@ -127,7 +143,7 @@ async fn collect(
         }
     }
     prev.retain(|k, _| seen.contains(k)); // drop deregistered containers
-    Ok(out)
+    Ok((out, matched_seen, total_seen - matched_seen))
 }
 
 fn to_resource(

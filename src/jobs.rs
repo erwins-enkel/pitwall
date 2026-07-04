@@ -82,6 +82,12 @@ pub fn parse_jobs(workflow: &str, branch: &str, json: &str) -> Vec<(u32, JobInfo
         .unwrap_or_default()
 }
 
+/// True when `repo` is the unset-`PITWALL_REPO` sentinel, meaning the poller
+/// should skip `gh` and surface a config hint instead of a 404.
+fn repo_is_placeholder(repo: &str) -> bool {
+    repo == crate::config::DEFAULT_REPO
+}
+
 async fn gh_api(path: &str) -> anyhow::Result<String> {
     let out = Command::new("gh").arg("api").arg(path).output().await?;
     if !out.status.success() {
@@ -107,12 +113,22 @@ async fn poll(repo: &str) -> anyhow::Result<HashMap<u32, JobInfo>> {
 
 pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
     loop {
-        let update = match poll(&cfg.repo).await {
-            Ok(jobs) => JobsUpdate { jobs, error: None },
-            Err(e) => JobsUpdate {
+        let update = if repo_is_placeholder(&cfg.repo) {
+            // PITWALL_REPO unset: don't poll gh for a repo that can't exist.
+            JobsUpdate {
                 jobs: HashMap::new(),
-                error: Some(format!("gh: {e}")),
-            },
+                error: Some(
+                    "PITWALL_REPO unset — set it to your runners' repo (e.g. myorg/myrepo)".into(),
+                ),
+            }
+        } else {
+            match poll(&cfg.repo).await {
+                Ok(jobs) => JobsUpdate { jobs, error: None },
+                Err(e) => JobsUpdate {
+                    jobs: HashMap::new(),
+                    error: Some(format!("gh: {e}")),
+                },
+            }
         };
         let _ = tx.send(update).await;
         tokio::time::sleep(Duration::from_secs(15)).await;
@@ -139,5 +155,11 @@ mod tests {
         assert_eq!(ji.workflow, "Test");
         assert_eq!(ji.job, "E2E Tests");
         assert_eq!(ji.branch, "main");
+    }
+
+    #[test]
+    fn placeholder_repo_detected_real_repo_not() {
+        assert!(repo_is_placeholder("owner/repo"));
+        assert!(!repo_is_placeholder("myorg/myrepo"));
     }
 }

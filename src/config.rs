@@ -5,6 +5,11 @@ use std::path::PathBuf;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
+/// Sentinel repo used when `PITWALL_REPO` is unset. The jobs poller detects it
+/// and surfaces a "set PITWALL_REPO" hint instead of polling `gh` for a repo
+/// that can't exist (which returns a bare 404).
+pub const DEFAULT_REPO: &str = "owner/repo";
+
 #[derive(Clone)]
 pub struct Config {
     pub socket_path: String,
@@ -120,7 +125,7 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
 
     let repo = env_nonempty(get, "PITWALL_REPO")
         .or(file.repo)
-        .unwrap_or_else(|| "owner/repo".into());
+        .unwrap_or_else(|| DEFAULT_REPO.into());
 
     let prefix = env_nonempty(get, "PITWALL_PREFIX")
         .or(file.prefix)

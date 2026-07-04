@@ -59,7 +59,7 @@ config file → built-in default**.
 |---|---|---|---|
 | socket | `PITWALL_SOCKET` | `socket` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
 | repo | `PITWALL_REPO` | `repo` | `owner/repo` (set this to your runners' repo) |
-| prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` |
+| prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` (must match your runner container names, e.g. `pulse-ci-runner-`) |
 | slice cap (GiB) | `PITWALL_SLICE_CAP_GIB` | `slice_cap_gib` | `24` |
 | theme | `PITWALL_THEME` | `theme` | `mocha` — Catppuccin flavor: `mocha`, `macchiato`, `frappe`, or `latte` (light). Unknown values fall back to `mocha`. |
 
@@ -99,4 +99,4 @@ Notes:
 - **Jobs** — polled every ~15s via `gh`. Only in-progress jobs on self-hosted runners are considered; GitHub-hosted, queued, and completed jobs are excluded.
 - **Join** — by trailing runner index: container `ci-runner-N` matches GitHub runner name `runner-N`.
 - **Gotcha** — a running container with no in-progress job is normal idle state, not an error. The runners are ephemeral and deregister between jobs, so gaps between "container up" and "job assigned" are expected.
-- **Degradation** — a broken docker socket or `gh` failure surfaces as a red status banner and keeps the last-known-good data on screen instead of blanking the UI; zero matching runners shows "waiting for runners…". No source failure panics; `q`/`Esc`/`Ctrl-C` always restore the terminal.
+- **Degradation** — a broken docker socket or `gh` failure surfaces as a red status banner and keeps the last-known-good data on screen instead of blanking the UI; the empty state is self-diagnosing (`waiting for runners…`, `waiting for runner stats…`, or `N containers running, none match prefix '…'`). No source failure panics; `q`/`Esc`/`Ctrl-C` always restore the terminal.
