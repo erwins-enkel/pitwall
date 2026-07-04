@@ -24,6 +24,14 @@ pub struct View<'a> {
     pub now: SystemTime,
     pub status: Option<String>,
     pub palette: &'a Palette,
+    /// Container name prefix (`PITWALL_PREFIX`) the resource poller filters on.
+    pub prefix: &'a str,
+    /// Running containers matching the prefix last poll. Non-zero with an empty
+    /// table means matches exist but stats weren't ready — not a mismatch.
+    pub matched_seen: usize,
+    /// Running containers NOT matching the prefix last poll. Drives the
+    /// prefix-mismatch hint when nothing matched.
+    pub unmatched_seen: usize,
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -162,9 +170,23 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(table, area);
 }
 
-fn render_empty_state(frame: &mut Frame, area: Rect, p: &Palette) {
+fn render_empty_state(frame: &mut Frame, area: Rect, view: &View) {
+    let p = view.palette;
     // Errors are already surfaced in the banner above; avoid showing them twice.
-    let message = "waiting for runners\u{2026}".to_string();
+    let message = if view.matched_seen > 0 {
+        // Runners matched the prefix but their stats weren't ready this poll;
+        // transient, retried every 2s. NOT a prefix mismatch.
+        "waiting for runner stats\u{2026}".to_string()
+    } else if view.unmatched_seen > 0 {
+        // Nothing matched, but the daemon has other containers running — the
+        // usual cause is a prefix (or socket) mismatch, so name it.
+        format!(
+            "{} containers running, none match prefix '{}'",
+            view.unmatched_seen, view.prefix
+        )
+    } else {
+        "waiting for runners\u{2026}".to_string()
+    };
     let chunks = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -232,7 +254,7 @@ pub fn render(frame: &mut Frame, view: &View) {
     let body_area = chunks[idx];
     idx += 1;
     if view.rows.is_empty() {
-        render_empty_state(frame, body_area, p);
+        render_empty_state(frame, body_area, view);
     } else {
         render_table(frame, body_area, view);
     }
@@ -328,6 +350,9 @@ mod tests {
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
                 },
             );
         })
@@ -368,6 +393,9 @@ mod tests {
                         now: SystemTime::now(),
                         status: None,
                         palette: &palette,
+                        prefix: "ci-runner-",
+                        matched_seen: 0,
+                        unmatched_seen: 0,
                     },
                 );
             })
@@ -393,6 +421,9 @@ mod tests {
                     now: SystemTime::now(),
                     status: Some("docker: unreachable".into()),
                     palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
                 },
             );
         })
@@ -405,5 +436,69 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(content.contains("docker: unreachable"));
+    }
+
+    #[test]
+    fn empty_rows_with_unmatched_containers_names_the_prefix() {
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 6,
+                },
+            );
+        })
+        .unwrap();
+        let content = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(content.contains("6 containers running"));
+        assert!(content.contains("ci-runner-"));
+    }
+
+    #[test]
+    fn empty_rows_with_matched_but_no_stats_shows_stats_pending() {
+        // Runners matched the prefix but stats weren't ready → must NOT claim a
+        // prefix mismatch (the critic's false-"none match" case).
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 3,
+                    unmatched_seen: 2,
+                },
+            );
+        })
+        .unwrap();
+        let content = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(content.contains("waiting for runner stats"));
+        assert!(!content.contains("none match"));
     }
 }
