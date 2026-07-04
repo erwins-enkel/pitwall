@@ -1,3 +1,4 @@
+use crate::theme::Flavor;
 use anyhow::Context;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ pub struct Config {
     pub repo: String,
     pub prefix: String,
     pub slice_cap_bytes: u64,
+    pub flavor: Flavor,
 }
 
 /// Optional settings parsed from the TOML config file. Every field is optional:
@@ -23,6 +25,7 @@ struct FileConfig {
     repo: Option<String>,
     prefix: Option<String>,
     slice_cap_gib: Option<u64>,
+    theme: Option<String>,
 }
 
 /// Where the config file lives, and whether the path was chosen explicitly.
@@ -128,11 +131,21 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
         .or(file.slice_cap_gib)
         .unwrap_or(24);
 
+    // Theme parsing is infallible: env wins, then file, then default; any
+    // unrecognized value maps to Mocha inside `parse_lenient`.
+    let flavor = Flavor::parse_lenient(
+        env_nonempty(get, "PITWALL_THEME")
+            .or(file.theme)
+            .unwrap_or_default()
+            .as_str(),
+    );
+
     Config {
         socket_path,
         repo,
         prefix,
         slice_cap_bytes: cap_gib.saturating_mul(GIB),
+        flavor,
     }
 }
 
@@ -175,6 +188,7 @@ mod tests {
         assert_eq!(c.prefix, "ci-runner-");
         assert_eq!(c.slice_cap_bytes, 24 * GIB);
         assert_eq!(c.socket_path, default_socket_path());
+        assert_eq!(c.flavor, Flavor::Mocha);
     }
 
     #[test]
@@ -184,12 +198,15 @@ mod tests {
             repo: Some("o/r".into()),
             prefix: Some("px-".into()),
             slice_cap_gib: Some(8),
+            theme: Some("latte".into()),
         };
         let c = resolve(file, &env(&[]));
         assert_eq!(c.socket_path, "/file.sock");
         assert_eq!(c.repo, "o/r");
         assert_eq!(c.prefix, "px-");
         assert_eq!(c.slice_cap_bytes, 8 * GIB);
+        // File `theme` is honored when the env var is unset.
+        assert_eq!(c.flavor, Flavor::Latte);
     }
 
     #[test]
@@ -199,6 +216,7 @@ mod tests {
             repo: Some("file/repo".into()),
             prefix: Some("file-".into()),
             slice_cap_gib: Some(8),
+            theme: Some("latte".into()),
         };
         let c = resolve(
             file,
@@ -207,12 +225,14 @@ mod tests {
                 ("PITWALL_REPO", "env/repo"),
                 ("PITWALL_PREFIX", "env-"),
                 ("PITWALL_SLICE_CAP_GIB", "16"),
+                ("PITWALL_THEME", "frappe"),
             ]),
         );
         assert_eq!(c.socket_path, "/env.sock");
         assert_eq!(c.repo, "env/repo");
         assert_eq!(c.prefix, "env-");
         assert_eq!(c.slice_cap_bytes, 16 * GIB);
+        assert_eq!(c.flavor, Flavor::Frappe);
     }
 
     #[test]

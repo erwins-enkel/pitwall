@@ -3,6 +3,7 @@ use crate::history::History;
 use crate::jobs::{self, JobsUpdate};
 use crate::model::{join, JobInfo, RunnerResource};
 use crate::resource::{self, ResourceUpdate};
+use crate::theme::Palette;
 use crate::ui::{self, View};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
@@ -27,6 +28,7 @@ struct AppState {
 /// over gh) becomes the status banner passed to `ui::render`.
 pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow::Result<()> {
     let slice_cap_bytes = cfg.slice_cap_bytes;
+    let palette = Palette::for_flavor(cfg.flavor);
 
     let (tx_res, mut rx_res) = mpsc::channel::<ResourceUpdate>(8);
     let (tx_jobs, mut rx_jobs) = mpsc::channel::<JobsUpdate>(8);
@@ -40,7 +42,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
     let mut res_alive = true;
     let mut jobs_alive = true;
 
-    draw(&mut terminal, &state, slice_cap_bytes)?;
+    draw(&mut terminal, &state, slice_cap_bytes, &palette)?;
 
     loop {
         tokio::select! {
@@ -62,7 +64,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow:
             },
             _ = ticker.tick() => {}
         }
-        draw(&mut terminal, &state, slice_cap_bytes)?;
+        draw(&mut terminal, &state, slice_cap_bytes, &palette)?;
     }
 }
 
@@ -100,6 +102,7 @@ fn draw(
     terminal: &mut ratatui::DefaultTerminal,
     state: &AppState,
     slice_cap_bytes: u64,
+    palette: &Palette,
 ) -> anyhow::Result<()> {
     // Docker errors take precedence over gh errors when both are present.
     let status = state
@@ -115,6 +118,7 @@ fn draw(
                 slice_cap_bytes,
                 now: SystemTime::now(),
                 status,
+                palette,
             },
         );
     })?;

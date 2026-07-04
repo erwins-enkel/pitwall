@@ -5,6 +5,7 @@ mod jobs;
 mod model;
 mod resource;
 mod stats_math;
+mod theme;
 mod ui;
 
 #[tokio::main]
