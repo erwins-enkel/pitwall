@@ -2,6 +2,10 @@
 
 btop-like terminal UI for self-hosted GitHub Actions runners: live CPU/mem per runner, joined with the workflow › job currently running. Covers both the docker "pulse" runners and the box's **native (non-docker) `Runner.Listener` runners**.
 
+![pitwall showing docker and native runners across idle, busy, warn, and near-cap states](docs/pitwall.png)
+
+> Screenshot with dummy data (Mocha theme). Regenerate it with `make screenshot`.
+
 ## What you see
 
 A table, one row per runner (docker runners first, then native):
