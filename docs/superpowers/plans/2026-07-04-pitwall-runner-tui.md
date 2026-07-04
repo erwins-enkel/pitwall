@@ -12,23 +12,29 @@
 
 - Rust edition 2021; toolchain already installed (rustc 1.95).
 - Docker access is **rootless**: socket `unix:///run/user/1000/docker.sock` (respect `DOCKER_HOST` env if set). The rootful `/var/run/docker.sock` does NOT see these containers.
-- Container↔runner join: container `pulse-ci-runner-N` ↔ GitHub `runner_name` `runner-N`, keyed on trailing integer N.
+- **Join key (validated against live `gh api`):** container `pulse-ci-runner-N` (`run-runner.sh` sets `--name pulse-ci-${runner_name}`) ↔ GitHub `runner_name` = `runner-N` (`RUNNER_NAME=runner-N`). Match jobs whose `runner_name` is **exactly `runner-<digits>`**, then key on the integer N.
+- **Exclude non-pulse jobs:** `runner_name` may be a GitHub-hosted runner like `"GitHub Actions 1000013810"` (confirmed in real payloads) — these must NOT join. The strict `^runner-\d+$` match handles this.
+- **Only `status == "in_progress"` jobs carry a live runner.** Queued jobs have no/blank `runner_name`; **completed jobs retain a stale `runner_name`** and must be excluded. Filter runs with `?status=in_progress` (bounds API calls/rate limits) AND filter jobs to `in_progress`.
 - Container up + no in-progress GitHub job = **idle** (expected steady state, never an error).
-- Jobs polled every 15s (rate-limit safe); docker stats stream continuous.
-- Defaults overridable by env: `PITWALL_REPO` = `erwins-enkel/pulse`, `PITWALL_PREFIX` = `pulse-ci-runner-`, `PITWALL_SLICE_CAP_GIB` = `24`.
+- Jobs polled every 15s (rate-limit safe); docker stats polled every 2s.
+- **All environment coupling is config, loaded at startup** (`src/config.rs`), overridable by env with defaults: `PITWALL_SOCKET` (default `$DOCKER_HOST` sans `unix://`, else `/run/user/$UID/docker.sock`), `PITWALL_REPO` = `erwins-enkel/pulse`, `PITWALL_PREFIX` = `pulse-ci-runner-`, `PITWALL_SLICE_CAP_GIB` = `24`. No value is hardcoded at a use-site; sources/UI read `Config`.
+- **Never panic into a broken terminal:** `ratatui::init()` installs a panic hook that restores; sources degrade (socket down / `gh` unauthenticated / zero runners) to a status banner + empty state, never a process exit.
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` must all pass; never suppress warnings to pass.
 - Binary installs to `~/.local/bin/pitwall`.
 
 ---
 
-### Task 1: Project scaffold + lint gate
+### Task 1: Project scaffold + lint gate + config module
 
 **Files:**
-- Create: `Cargo.toml`, `src/main.rs`, `rustfmt.toml`, `.githooks/pre-commit`
+- Create: `Cargo.toml`, `src/main.rs`, `src/config.rs`, `rustfmt.toml`, `.githooks/pre-commit`
 - Modify: `.gitignore`
 
 **Interfaces:**
-- Produces: a buildable binary crate named `pitwall` with all deps declared; a committed pre-commit hook running fmt+clippy+test.
+- Produces:
+  - a buildable binary crate named `pitwall` with all deps declared; a committed pre-commit hook running fmt+clippy+test.
+  - `pub struct Config { pub socket_path: String, pub repo: String, pub prefix: String, pub slice_cap_bytes: u64 }`
+  - `pub fn Config::from_env() -> Config` — reads `PITWALL_SOCKET` (else `$DOCKER_HOST` sans `unix://`, else `/run/user/$UID/docker.sock`), `PITWALL_REPO`, `PITWALL_PREFIX`, `PITWALL_SLICE_CAP_GIB` (→ bytes), applying the documented defaults. Consumed by `resource`, `jobs`, and `ui`.
 
 - [ ] **Step 1: Init crate** — `cargo init --name pitwall .` (repo already exists; this adds `Cargo.toml` + `src/main.rs`). If `cargo init` refuses on a non-empty dir, create `Cargo.toml` and `src/main.rs` by hand.
 
@@ -49,6 +55,7 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 bollard = "0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+humantime = "2"
 
 [profile.release]
 strip = true
@@ -83,9 +90,54 @@ cargo test --quiet
 
 Then `git config core.hooksPath .githooks`.
 
-- [ ] **Step 7: Verify** — `cargo build && cargo clippy --all-targets -- -D warnings && cargo fmt --check`. Expected: clean build, no warnings.
+- [ ] **Step 7: `src/config.rs` with a defaults test (TDD)** — add `mod config;` to `main.rs`.
 
-- [ ] **Step 8: Commit** — `git add -A && git commit -m "chore: scaffold pitwall rust crate + lint hook"`
+```rust
+#[derive(Clone)]
+pub struct Config {
+    pub socket_path: String,
+    pub repo: String,
+    pub prefix: String,
+    pub slice_cap_bytes: u64,
+}
+
+impl Config {
+    pub fn from_env() -> Config {
+        let socket_path = std::env::var("PITWALL_SOCKET").ok().unwrap_or_else(|| {
+            std::env::var("DOCKER_HOST")
+                .ok()
+                .map(|h| h.trim_start_matches("unix://").to_string())
+                .unwrap_or_else(|| {
+                    let uid = std::env::var("UID").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1000);
+                    format!("/run/user/{uid}/docker.sock")
+                })
+        });
+        let repo = std::env::var("PITWALL_REPO").unwrap_or_else(|_| "erwins-enkel/pulse".into());
+        let prefix = std::env::var("PITWALL_PREFIX").unwrap_or_else(|_| "pulse-ci-runner-".into());
+        let cap_gib = std::env::var("PITWALL_SLICE_CAP_GIB").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(24);
+        Config { socket_path, repo, prefix, slice_cap_bytes: cap_gib * 1024 * 1024 * 1024 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cap_gib_converts_to_bytes_default_24() {
+        // Defaults hold when env is unset in the test process.
+        std::env::remove_var("PITWALL_SLICE_CAP_GIB");
+        std::env::remove_var("PITWALL_REPO");
+        let c = Config::from_env();
+        assert_eq!(c.slice_cap_bytes, 24 * 1024 * 1024 * 1024);
+        assert_eq!(c.repo, "erwins-enkel/pulse");
+        assert_eq!(c.prefix, "pulse-ci-runner-");
+    }
+}
+```
+
+- [ ] **Step 8: Verify** — `cargo build && cargo test config && cargo clippy --all-targets -- -D warnings && cargo fmt --check`. Expected: clean build, config test passes, no warnings.
+
+- [ ] **Step 9: Commit** — `git add -A && git commit -m "chore: scaffold pitwall rust crate + lint hook + config"`
 
 ---
 
@@ -319,15 +371,18 @@ pub fn mem_used(usage: u64, inactive_file: u64) -> u64 {
 - Modify: `src/main.rs` (`mod resource;`)
 
 **Interfaces:**
-- Consumes: `model::RunnerResource`, `stats_math::{cpu_pct, mem_used}`.
+- Consumes: `model::RunnerResource`, `stats_math::{cpu_pct, mem_used}`, `config::Config`.
 - Produces:
-  - `pub fn connect() -> anyhow::Result<bollard::Docker>` — honors `DOCKER_HOST` (strip `unix://`), else `/run/user/{uid}/docker.sock` via `Docker::connect_with_unix(path, 120, bollard::API_DEFAULT_VERSION)`.
-  - `pub fn container_matches(name: &str, prefix: &str) -> bool` — pure, trims leading `/`, checks prefix (TDD this one).
-  - `pub async fn run(docker: Docker, prefix: String, tx: mpsc::Sender<Vec<RunnerResource>>)` — every ~2s lists running containers matching prefix, one-shot `stats` per container, builds `Vec<RunnerResource>`, sends via `tx`. On error: log to stderr-less buffer (ignore), keep looping.
+  - `pub struct ResourceUpdate { pub resources: Vec<RunnerResource>, pub error: Option<String> }` — what the source sends each cycle (error carries a human message when docker is unreachable; `resources` empty on error).
+  - `pub struct CpuSample { pub total: u64, pub system: u64 }` — a container's cumulative CPU counters from one poll.
+  - `pub fn container_matches(name: &str, prefix: &str) -> bool` — pure, trims leading `/`, checks prefix (TDD).
+  - `pub fn cpu_from_samples(prev: Option<CpuSample>, cur: CpuSample, online: u64) -> f64` — first poll (`prev == None`) → `0.0`; else `stats_math::cpu_pct(cur.total, prev.total, cur.system, prev.system, online)` (TDD — this is the retention seam).
+  - `pub fn connect(socket_path: &str) -> anyhow::Result<bollard::Docker>` — `Docker::connect_with_unix(socket_path, 120, bollard::API_DEFAULT_VERSION)`.
+  - `pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>)` — 2s loop; owns a `HashMap<String /*container id*/, CpuSample>` of the PREVIOUS poll's samples. Each cycle: (re)connect if needed, list running containers matching `cfg.prefix`, one-shot `stats(stream=false)` per container, compute CPU% via `cpu_from_samples(prev_sample, cur_sample, online)`, update the retained map, build `Vec<RunnerResource>`, send `ResourceUpdate { resources, error: None }`. On connect/list/stats failure send `ResourceUpdate { resources: vec![], error: Some(msg) }` and keep looping (retry next cycle).
 
-Note on the streaming-vs-poll tradeoff: bollard's per-container `stream(true)` gives one task per container. For 6 containers a **2s one-shot poll loop** (`stream(false)`) is simpler, still smooth enough, and yields cpu delta from the stat's own `precpu_stats`. Use the one-shot poll; it keeps this task a single tokio task and avoids per-container task lifecycle. (Streaming remains a later optimization; not needed for v1 feel.)
+**Why retention (reviewer point 1):** bollard's one-shot `stats(stream=false)` returns a snapshot whose `precpu_stats` is **zeroed** — you cannot compute a delta from a single response. The docker CLI hides this by doing two reads internally. So `resource` must hold the previous poll's `CpuSample` per container and diff `(prev, cur)` itself, **ignoring the API's `precpu_stats` entirely**. `cpu_from_samples` isolates and tests exactly this.
 
-- [ ] **Step 1: Failing test for the pure helper** — in `src/resource.rs`:
+- [ ] **Step 1: Failing tests for the pure helpers (incl. named retention test)** — in `src/resource.rs`:
 
 ```rust
 #[cfg(test)]
@@ -340,14 +395,26 @@ mod tests {
         assert!(container_matches("pulse-ci-runner-1", "pulse-ci-runner-"));
         assert!(!container_matches("other-thing", "pulse-ci-runner-"));
     }
+
+    #[test]
+    fn first_poll_zero_then_delta_from_retained_sample() {
+        // First poll: no prior sample → 0% (cannot delta a single snapshot).
+        let s0 = CpuSample { total: 1_000_000_000, system: 4_000_000_000 };
+        assert_eq!(cpu_from_samples(None, s0, 4), 0.0);
+        // Second poll: 1 full core used over the interval on a 4-core box → 100%.
+        let s1 = CpuSample { total: 2_000_000_000, system: 8_000_000_000 };
+        let pct = cpu_from_samples(Some(s0), s1, 4);
+        assert!((pct - 100.0).abs() < 0.001, "got {pct}");
+    }
 }
 ```
 
 - [ ] **Step 2: Run — expect fail** — `cargo test resource`.
 
-- [ ] **Step 3: Implement** `container_matches`, `connect`, `run`:
+- [ ] **Step 3: Implement** `container_matches`, `cpu_from_samples`, `connect`, `run` (retaining prev samples, ignoring `precpu_stats`):
 
 ```rust
+use crate::config::Config;
 use crate::model::RunnerResource;
 use crate::stats_math::{cpu_pct, mem_used};
 use bollard::query_parameters::{ListContainersOptionsBuilder, StatsOptionsBuilder};
@@ -357,74 +424,117 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone, Copy)]
+pub struct CpuSample {
+    pub total: u64,
+    pub system: u64,
+}
+
+pub struct ResourceUpdate {
+    pub resources: Vec<RunnerResource>,
+    pub error: Option<String>,
+}
+
 pub fn container_matches(name: &str, prefix: &str) -> bool {
     name.trim_start_matches('/').starts_with(prefix)
 }
 
-pub fn connect() -> anyhow::Result<Docker> {
-    let path = std::env::var("DOCKER_HOST")
-        .ok()
-        .map(|h| h.trim_start_matches("unix://").to_string())
-        .unwrap_or_else(|| format!("/run/user/{}/docker.sock", nix_uid()));
-    Ok(Docker::connect_with_unix(&path, 120, bollard::API_DEFAULT_VERSION)?)
+pub fn cpu_from_samples(prev: Option<CpuSample>, cur: CpuSample, online: u64) -> f64 {
+    match prev {
+        None => 0.0, // first poll: no prior snapshot to delta against
+        Some(p) => cpu_pct(cur.total, p.total, cur.system, p.system, online),
+    }
 }
 
-fn nix_uid() -> u32 {
-    // Avoid extra deps: read from env or default to 1000.
-    std::env::var("UID").ok().and_then(|s| s.parse().ok()).unwrap_or(1000)
+pub fn connect(socket_path: &str) -> anyhow::Result<Docker> {
+    Ok(Docker::connect_with_unix(socket_path, 120, bollard::API_DEFAULT_VERSION)?)
 }
 
-pub async fn run(docker: Docker, prefix: String, tx: mpsc::Sender<Vec<RunnerResource>>) {
+pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>) {
+    // Retained previous-poll CPU counters, keyed by container id. IGNORE the API's
+    // precpu_stats (zeroed for one-shot stats); we compute the delta ourselves.
+    let mut prev: HashMap<String, CpuSample> = HashMap::new();
+    let mut docker: Option<Docker> = None;
     loop {
-        if let Ok(list) = docker
-            .list_containers(Some(ListContainersOptionsBuilder::default().build()))
-            .await
-        {
-            let mut out = Vec::new();
-            for c in list {
-                let name = c
-                    .names
-                    .as_ref()
-                    .and_then(|n| n.first())
-                    .cloned()
-                    .unwrap_or_default();
-                if !container_matches(&name, &prefix) {
+        if docker.is_none() {
+            match connect(&cfg.socket_path) {
+                Ok(d) => docker = Some(d),
+                Err(e) => {
+                    let _ = tx
+                        .send(ResourceUpdate { resources: vec![], error: Some(format!("docker: {e}")) })
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
-                let id = match &c.id {
-                    Some(id) => id.clone(),
-                    None => continue,
-                };
-                if let Ok(Some(stat)) = docker
-                    .stats(&id, Some(StatsOptionsBuilder::default().stream(false).build()))
-                    .try_next()
-                    .await
-                {
-                    if let Some(rr) = to_resource(&name, &stat) {
-                        out.push(rr);
-                    }
-                }
             }
-            let _ = tx.send(out).await;
+        }
+        let d = docker.as_ref().unwrap();
+        match collect(d, &cfg.prefix, &mut prev).await {
+            Ok(resources) => {
+                let _ = tx.send(ResourceUpdate { resources, error: None }).await;
+            }
+            Err(e) => {
+                docker = None; // force reconnect next cycle
+                let _ = tx
+                    .send(ResourceUpdate { resources: vec![], error: Some(format!("docker: {e}")) })
+                    .await;
+            }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
-fn to_resource(name: &str, s: &bollard::models::ContainerStatsResponse) -> Option<RunnerResource> {
+async fn collect(
+    d: &Docker,
+    prefix: &str,
+    prev: &mut HashMap<String, CpuSample>,
+) -> anyhow::Result<Vec<RunnerResource>> {
+    let list = d
+        .list_containers(Some(ListContainersOptionsBuilder::default().build()))
+        .await?;
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for c in list {
+        let name = c.names.as_ref().and_then(|n| n.first()).cloned().unwrap_or_default();
+        if !container_matches(&name, prefix) {
+            continue;
+        }
+        let id = match &c.id {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+        seen.push(id.clone());
+        if let Ok(Some(stat)) = d
+            .stats(&id, Some(StatsOptionsBuilder::default().stream(false).build()))
+            .try_next()
+            .await
+        {
+            if let Some(rr) = to_resource(&id, &name, &stat, prev) {
+                out.push(rr);
+            }
+        }
+    }
+    prev.retain(|k, _| seen.contains(k)); // drop deregistered containers
+    Ok(out)
+}
+
+fn to_resource(
+    id: &str,
+    name: &str,
+    s: &bollard::models::ContainerStatsResponse,
+    prev: &mut HashMap<String, CpuSample>,
+) -> Option<RunnerResource> {
     let cpu = s.cpu_stats.as_ref()?;
-    let pre = s.precpu_stats.as_ref()?;
     let mem = s.memory_stats.as_ref()?;
     let online = cpu.online_cpus.unwrap_or_else(|| {
         cpu.cpu_usage.as_ref().and_then(|u| u.percpu_usage.as_ref()).map(|v| v.len() as u64).unwrap_or(1)
     });
-    let pct = cpu_pct(
-        cpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0),
-        pre.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0),
-        cpu.system_cpu_usage.unwrap_or(0),
-        pre.system_cpu_usage.unwrap_or(0),
-        online,
-    );
+    let cur = CpuSample {
+        total: cpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0),
+        system: cpu.system_cpu_usage.unwrap_or(0),
+    };
+    let pct = cpu_from_samples(prev.get(id).copied(), cur, online);
+    prev.insert(id.to_string(), cur);
     let inactive = mem.stats.as_ref().and_then(|m| m.get("inactive_file").copied()).unwrap_or(0);
     let used = mem_used(mem.usage.unwrap_or(0), inactive);
     Some(RunnerResource {
@@ -436,13 +546,13 @@ fn to_resource(name: &str, s: &bollard::models::ContainerStatsResponse) -> Optio
 }
 ```
 
-> The exact bollard 0.20 field names (`ContainerStatsResponse`, `cpu_stats`, `memory_stats.stats` map type) must be confirmed against the crate's docs.rs while implementing — adjust option-unwrapping to match. The `stats_math`/`model` contracts do not change.
+> Confirm exact bollard 0.20 field names/types (`ContainerStatsResponse`, `cpu_stats`, `memory_stats.stats` map) against docs.rs while implementing — adjust option-unwrapping to match. The `stats_math`/`model` contracts do not change. `cpu_from_samples` uses `stats_math::cpu_pct`; keep `#[allow(dead_code)]`-free by ensuring `cpu_pct` stays referenced.
 
-- [ ] **Step 4: Run — expect pass (unit)** — `cargo test resource` (only the pure test runs).
+- [ ] **Step 4: Run — expect pass (unit)** — `cargo test resource` (the two pure tests run: prefix match + retention delta).
 
-- [ ] **Step 5: Manual smoke** — a throwaway `main` or `cargo run` wiring is not required yet; confirm compile with `cargo build`.
+- [ ] **Step 5: Live smoke against real docker** — add a temporary `#[tokio::main]` example or unit-gated manual check, or defer to Task 7's live run. Minimum here: `cargo build` compiles; if convenient, a throwaway binary printing one `collect()` result shows the 6 runners with **non-zero-capable** CPU% on the *second* poll (first poll shows 0.0 by design).
 
-- [ ] **Step 6: Commit** — `git commit -am "feat: bollard rootless docker resource source"`
+- [ ] **Step 6: Commit** — `git commit -am "feat: bollard rootless docker source with retained-sample cpu%"`
 
 ---
 
@@ -453,24 +563,44 @@ fn to_resource(name: &str, s: &bollard::models::ContainerStatsResponse) -> Optio
 - Modify: `src/main.rs` (`mod jobs;`)
 
 **Interfaces:**
-- Consumes: `model::JobInfo`.
+- Consumes: `model::JobInfo`, `config::Config`.
 - Produces:
-  - `pub fn parse_runs(json: &str) -> Vec<u64>` — extract `workflow_runs[].id`.
-  - `pub fn parse_jobs(runs_workflow: &str, json: &str) -> Vec<(u32, JobInfo)>` — from a run's jobs payload, for each job with a `runner_name` matching `runner-N` and `status == "in_progress"`, produce `(N, JobInfo{ workflow, job: job.name, started_at })`. `started_at` from `started_at` RFC3339 → SystemTime.
-  - `pub async fn run(repo: String, tx: mpsc::Sender<HashMap<u32, JobInfo>>)` — every 15s: `gh api repos/{repo}/actions/runs?status=in_progress`, for each run id `gh api repos/{repo}/actions/runs/{id}/jobs`, aggregate into a map, send. On any error keep the loop (caller retains last map).
+  - `pub struct JobsUpdate { pub jobs: HashMap<u32, JobInfo>, pub error: Option<String> }` — sent each cycle; `error` set (and `jobs` empty) when `gh` fails/unauthenticated, so the caller can show a banner while retaining its last-known map.
+  - `pub fn parse_runs(json: &str) -> Vec<(u64, String)>` — extract `workflow_runs[].{id, name}` (name = workflow label for the join).
+  - `pub fn parse_jobs(workflow: &str, json: &str) -> Vec<(u32, JobInfo)>` — for each job where `status == "in_progress"` AND `runner_name` matches **exactly `^runner-\d+$`**, produce `(N, JobInfo{ workflow, job: job.name, started_at })`. Excludes GitHub-hosted (`"GitHub Actions …"`), queued (no runner_name), and completed (stale runner_name) jobs. `started_at` RFC3339 → `SystemTime` via `humantime::parse_rfc3339`.
+  - `pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>)` — every 15s: `gh api repos/{repo}/actions/runs?status=in_progress`; for each `(id, name)` → `gh api repos/{repo}/actions/runs/{id}/jobs`, mapping via `parse_jobs(name, …)`; send `JobsUpdate { jobs, error: None }`. On `gh` failure send `JobsUpdate { jobs: HashMap::new(), error: Some(msg) }` and keep looping.
 
-- [ ] **Step 1: Capture fixtures** — save a real (or minimal representative) payload:
+- [ ] **Step 1: Front-load the join-key validation with REAL payloads (reviewer point 2).** Before writing any parser, capture live shapes and confirm the key:
+
+```bash
+# a run id (any status) + confirm runner_name shapes
+RID=$(gh api 'repos/erwins-enkel/pulse/actions/runs?per_page=1' --jq '.workflow_runs[0].id')
+gh api "repos/erwins-enkel/pulse/actions/runs/$RID/jobs" \
+  --jq '.jobs[] | {name, status, runner_name, started_at}'
+```
+
+Confirmed on 2026-07-04 (bake these facts into the tests):
+  - Self-hosted pulse jobs carry `runner_name` = `runner-<N>` (e.g. `runner-4`) — the join key.
+  - GitHub-hosted jobs carry `runner_name` = `"GitHub Actions 1000013810"` — **must be excluded**.
+  - `status` is `completed` or `in_progress`; **completed jobs keep a stale `runner_name`** — only `in_progress` is a live runner.
+  - `started_at` is RFC3339 `Z` (e.g. `2026-07-04T12:25:18Z`).
+
+Save trimmed real payloads as fixtures containing all three job kinds:
 
 `tests/fixtures/runs.json`:
 ```json
-{"total_count":1,"workflow_runs":[{"id":123,"name":"ci"}]}
+{"total_count":1,"workflow_runs":[{"id":123,"name":"Test"}]}
 ```
 `tests/fixtures/jobs.json`:
 ```json
-{"total_count":1,"jobs":[{"name":"test","status":"in_progress","runner_name":"runner-4","started_at":"2026-07-04T10:00:00Z"}]}
+{"total_count":3,"jobs":[
+  {"name":"E2E Tests","status":"in_progress","runner_name":"runner-4","started_at":"2026-07-04T12:25:18Z"},
+  {"name":"Migration Execution Test","status":"completed","runner_name":"GitHub Actions 1000013810","started_at":"2026-07-04T12:22:56Z"},
+  {"name":"Coverage Gate","status":"completed","runner_name":"runner-3","started_at":"2026-07-04T12:24:48Z"}
+]}
 ```
 
-- [ ] **Step 2: Failing tests** — `src/jobs.rs`:
+- [ ] **Step 2: Failing tests** — `src/jobs.rs` (assert hosted + completed are excluded):
 
 ```rust
 #[cfg(test)]
@@ -478,19 +608,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_runs_extracts_ids() {
-        let ids = parse_runs(include_str!("../tests/fixtures/runs.json"));
-        assert_eq!(ids, vec![123]);
+    fn parse_runs_extracts_id_and_name() {
+        let runs = parse_runs(include_str!("../tests/fixtures/runs.json"));
+        assert_eq!(runs, vec![(123u64, "Test".to_string())]);
     }
 
     #[test]
-    fn parse_jobs_maps_runner_index() {
-        let out = parse_jobs("ci", include_str!("../tests/fixtures/jobs.json"));
+    fn parse_jobs_keeps_only_in_progress_self_hosted() {
+        let out = parse_jobs("Test", include_str!("../tests/fixtures/jobs.json"));
+        // Only the in_progress runner-4 job survives; hosted + completed excluded.
         assert_eq!(out.len(), 1);
         let (idx, ji) = &out[0];
         assert_eq!(*idx, 4);
-        assert_eq!(ji.workflow, "ci");
-        assert_eq!(ji.job, "test");
+        assert_eq!(ji.workflow, "Test");
+        assert_eq!(ji.job, "E2E Tests");
     }
 }
 ```
@@ -500,26 +631,43 @@ mod tests {
 - [ ] **Step 4: Implement** using serde_json `Value`, tokio `Command`:
 
 ```rust
+use crate::config::Config;
 use crate::model::JobInfo;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-pub fn parse_runs(json: &str) -> Vec<u64> {
+pub struct JobsUpdate {
+    pub jobs: HashMap<u32, JobInfo>,
+    pub error: Option<String>,
+}
+
+pub fn parse_runs(json: &str) -> Vec<(u64, String)> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| v.get("workflow_runs").and_then(|r| r.as_array()).cloned())
         .unwrap_or_default()
         .iter()
-        .filter_map(|r| r.get("id").and_then(|i| i.as_u64()))
+        .filter_map(|r| {
+            let id = r.get("id")?.as_u64()?;
+            let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            Some((id, name))
+        })
         .collect()
 }
 
 fn parse_rfc3339(s: &str) -> SystemTime {
-    // Minimal: parse "YYYY-MM-DDTHH:MM:SSZ" to epoch. Prefer a tiny helper over chrono.
-    // Implementation detail: convert via time components; if parse fails, return now().
     humantime::parse_rfc3339(s).unwrap_or_else(|_| SystemTime::now())
+}
+
+/// Strict self-hosted key: `runner-<digits>` only. Rejects "GitHub Actions 123", "gh-runner-3", etc.
+fn runner_index_strict(runner_name: &str) -> Option<u32> {
+    let n = runner_name.strip_prefix("runner-")?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
 }
 
 pub fn parse_jobs(workflow: &str, json: &str) -> Vec<(u32, JobInfo)> {
@@ -534,7 +682,7 @@ pub fn parse_jobs(workflow: &str, json: &str) -> Vec<(u32, JobInfo)> {
                 .filter(|j| j.get("status").and_then(|s| s.as_str()) == Some("in_progress"))
                 .filter_map(|j| {
                     let rn = j.get("runner_name")?.as_str()?;
-                    let idx: u32 = rn.rsplit('-').next()?.parse().ok()?;
+                    let idx = runner_index_strict(rn)?;
                     let job = j.get("name")?.as_str()?.to_string();
                     let started = j
                         .get("started_at")
@@ -551,38 +699,40 @@ pub fn parse_jobs(workflow: &str, json: &str) -> Vec<(u32, JobInfo)> {
 async fn gh_api(path: &str) -> anyhow::Result<String> {
     let out = Command::new("gh").arg("api").arg(path).output().await?;
     if !out.status.success() {
-        anyhow::bail!("gh api failed: {}", String::from_utf8_lossy(&out.stderr));
+        anyhow::bail!("gh api failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub async fn run(repo: String, tx: mpsc::Sender<HashMap<u32, JobInfo>>) {
-    loop {
-        if let Ok(runs_json) = gh_api(&format!("repos/{repo}/actions/runs?status=in_progress")).await {
-            let mut map = HashMap::new();
-            for id in parse_runs(&runs_json) {
-                // workflow name: pull from the run object; simple approach re-fetches nothing —
-                // use the run's "name" via a second pass or store from parse. For v1 use run name lookup:
-                if let Ok(jobs_json) = gh_api(&format!("repos/{repo}/actions/runs/{id}/jobs")).await {
-                    // workflow label: best-effort from jobs payload's first job's workflow_name if present,
-                    // else the run name captured in parse_runs (extend parse_runs to return (id,name)).
-                    for (idx, ji) in parse_jobs("", &jobs_json) {
-                        map.insert(idx, ji);
-                    }
-                }
-            }
-            let _ = tx.send(map).await;
+async fn poll(repo: &str) -> anyhow::Result<HashMap<u32, JobInfo>> {
+    let runs_json = gh_api(&format!("repos/{repo}/actions/runs?status=in_progress")).await?;
+    let mut map = HashMap::new();
+    for (id, name) in parse_runs(&runs_json) {
+        let jobs_json = gh_api(&format!("repos/{repo}/actions/runs/{id}/jobs")).await?;
+        for (idx, ji) in parse_jobs(&name, &jobs_json) {
+            map.insert(idx, ji);
         }
+    }
+    Ok(map)
+}
+
+pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
+    loop {
+        let update = match poll(&cfg.repo).await {
+            Ok(jobs) => JobsUpdate { jobs, error: None },
+            Err(e) => JobsUpdate { jobs: HashMap::new(), error: Some(format!("gh: {e}")) },
+        };
+        let _ = tx.send(update).await;
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
 ```
 
-> Decisions to lock while implementing: (a) add `humantime = "2"` to Cargo.toml for RFC3339 parsing (small, no chrono); (b) to fill `workflow`, change `parse_runs` to return `Vec<(u64, String)>` (id, run name) and thread the name into `parse_jobs` — update Task 5 tests accordingly if you make this change. Keep the `parse_jobs(workflow, json)` signature as the tested contract.
+> Note: `Config` isn't `Clone` by default and both sources take it by value — derive `Clone` on `Config` in Task 1, or pass the needed fields (`repo`, and for `resource` `socket_path`/`prefix`) by value. Simplest: `#[derive(Clone)]` on `Config`.
 
 - [ ] **Step 5: Run — expect pass** — `cargo test jobs`.
 
-- [ ] **Step 6: Commit** — `git commit -am "feat: gh jobs source + fixtures"`
+- [ ] **Step 6: Commit** — `git commit -am "feat: gh jobs source (strict runner-N, in_progress only) + fixtures"`
 
 ---
 
@@ -595,8 +745,8 @@ pub async fn run(repo: String, tx: mpsc::Sender<HashMap<u32, JobInfo>>) {
 **Interfaces:**
 - Consumes: `model::{RunnerRow, Load, elapsed_secs, slice_total_bytes}`.
 - Produces:
-  - `pub struct View<'a> { pub rows: &'a [RunnerRow], pub slice_cap_bytes: u64, pub now: SystemTime, pub stale_jobs: bool }`
-  - `pub fn render(frame: &mut ratatui::Frame, view: &View)` — draws a `Table` (columns runner|CPU|mem|workflow › job|elapsed, colored by `Load`) and a bottom `Gauge` for slice total vs cap.
+  - `pub struct View<'a> { pub rows: &'a [RunnerRow], pub slice_cap_bytes: u64, pub now: SystemTime, pub status: Option<String> }` — `status` carries a one-line banner (docker/gh error, or `None` when healthy).
+  - `pub fn render(frame: &mut ratatui::Frame, view: &View)` — draws the header (+ `status` banner in red when set), the `Table` (columns runner|CPU|mem|workflow › job|elapsed, colored by `Load`), and a bottom `Gauge` for slice total vs cap. **When `rows` is empty, render a centered empty-state line** (`"waiting for runners…"` when `status` is None, else the status message) instead of an empty table — so socket-down / gh-down / zero-runners never looks like a crash.
   - `pub fn fmt_mem(bytes: u64) -> String`, `pub fn fmt_elapsed(secs: u64) -> String` (pure, TDD).
 
 - [ ] **Step 1: Failing tests for formatters + a TestBackend smoke test** — `src/ui.rs`:
@@ -630,23 +780,34 @@ mod tests {
         }];
         let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
         term.draw(|f| {
-            render(f, &View { rows: &rows, slice_cap_bytes: 24 * 1024 * 1024 * 1024, now: SystemTime::now(), stale_jobs: false });
+            render(f, &View { rows: &rows, slice_cap_bytes: 24 * 1024 * 1024 * 1024, now: SystemTime::now(), status: None });
         })
         .unwrap();
         let content = term.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>();
         assert!(content.contains("pulse-ci-runner-1"));
         assert!(content.contains("idle"));
     }
+
+    #[test]
+    fn empty_rows_with_status_shows_banner_not_blank() {
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| {
+            render(f, &View { rows: &[], slice_cap_bytes: 24 * 1024 * 1024 * 1024, now: SystemTime::now(), status: Some("docker: unreachable".into()) });
+        })
+        .unwrap();
+        let content = term.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(content.contains("docker: unreachable"));
+    }
 }
 ```
 
 - [ ] **Step 2: Run — expect fail** — `cargo test ui`.
 
-- [ ] **Step 3: Implement** formatters + `render` (ratatui 0.30 API: `Table::new(rows, widths)`, `Row`, `Cell`, `Gauge`, `Layout`, `Style`/`Color`). Idle → dim/gray, Busy → green, NearCap → red. Show `— idle` when `job` is None; else `{workflow} › {job}` and `fmt_elapsed`. Gauge ratio = `slice_total_bytes(rows) / slice_cap_bytes`, label `X.X / 24 GiB`. If `stale_jobs`, add a header note. (Full render code written during implementation against docs.rs/ratatui/0.30.2.)
+- [ ] **Step 3: Implement** formatters + `render` (ratatui 0.30 API: `Table::new(rows, widths)`, `Row`, `Cell`, `Gauge`, `Layout`, `Style`/`Color`, `Paragraph` for banner/empty-state). Idle → dim/gray, Busy → green, NearCap → red. Show `— idle` when `job` is None; else `{workflow} › {job}` and `fmt_elapsed`. Gauge ratio = `slice_total_bytes(rows) / slice_cap_bytes` (clamp to `0.0..=1.0`), label `X.X / N GiB` from `slice_cap_bytes`. `status` (when `Some`) renders as a red banner row; empty `rows` renders the centered empty-state `Paragraph`. (Full render code written during implementation against docs.rs/ratatui/0.30.2.)
 
 - [ ] **Step 4: Run — expect pass** — `cargo test ui`.
 
-- [ ] **Step 5: Commit** — `git commit -am "feat: ratatui table + slice gauge"`
+- [ ] **Step 5: Commit** — `git commit -am "feat: ratatui table + slice gauge + status/empty state"`
 
 ---
 
@@ -657,19 +818,19 @@ mod tests {
 - Create: `src/app.rs`
 
 **Interfaces:**
-- Consumes: `resource::run`, `jobs::run`, `ui::{render, View}`, `model::{RunnerResource, JobInfo, join}`.
-- Produces: a running TUI. `#[tokio::main] async fn main()`.
+- Consumes: `config::Config`, `resource::{run, ResourceUpdate}`, `jobs::{run, JobsUpdate}`, `ui::{render, View}`, `model::{RunnerResource, JobInfo, join}`.
+- Produces: a running TUI. `pub async fn run(mut terminal: ratatui::DefaultTerminal) -> anyhow::Result<()>`.
 
 - [ ] **Step 1: Implement `src/app.rs`** — shared state + event loop:
-  - `struct AppState { resources: Vec<RunnerResource>, jobs: HashMap<u32, JobInfo>, jobs_stale: bool }`.
-  - Spawn `resource::run` (tx_res) and `jobs::run` (tx_jobs).
-  - Main loop uses `tokio::select!` over: crossterm `EventStream` (quit on `q`/`Ctrl-C`/`Esc`), `tx_res` receiver, `tx_jobs` receiver, and a `tokio::time::interval(1s)` tick. On each, update state and redraw with `terminal.draw(|f| ui::render(f, &view))` where `view.rows = join(state.resources.clone(), &state.jobs, now)`.
-  - Config read from env (`PITWALL_REPO`, `PITWALL_PREFIX`, `PITWALL_SLICE_CAP_GIB`).
+  - `struct AppState { resources: Vec<RunnerResource>, jobs: HashMap<u32, JobInfo>, resource_err: Option<String>, jobs_err: Option<String> }`.
+  - `Config::from_env()` once; clone into `resource::run(cfg.clone(), tx_res)` and `jobs::run(cfg.clone(), tx_jobs)` (both `tokio::spawn`).
+  - Main loop uses `tokio::select!` over: crossterm `EventStream` (quit on `q`/`Ctrl-C`/`Esc`), `tx_res` receiver → set `resources` + `resource_err` from `ResourceUpdate`, `tx_jobs` receiver → set `jobs` + `jobs_err` from `JobsUpdate`, and a `tokio::time::interval(1s)` tick. **Degradation (reviewer point 5):** on a source error, keep the last-known good data but surface the message; build `status = resource_err.or(jobs_err)` (docker error takes precedence) and pass it into `View`. Redraw with `terminal.draw(|f| ui::render(f, &view))` where `view.rows = join(state.resources.clone(), &state.jobs, SystemTime::now())`. With zero runners the rows are empty and `ui` shows the empty-state — never a panic.
 
 - [ ] **Step 2: `src/main.rs`**
 
 ```rust
 mod app;
+mod config;
 mod jobs;
 mod model;
 mod resource;
@@ -678,6 +839,7 @@ mod ui;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ratatui::init installs a panic hook that restores the terminal before unwinding.
     let terminal = ratatui::init();
     let res = app::run(terminal).await;
     ratatui::restore();
@@ -687,9 +849,14 @@ async fn main() -> anyhow::Result<()> {
 
 - [ ] **Step 3: Build + clippy** — `cargo build && cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Run live** — `cargo run`. Confirm all 6 `pulse-ci-runner-*` rows appear, CPU/mem update ~2s, all show idle, slice gauge populates, `q` quits and restores the terminal.
+- [ ] **Step 4: Run live (happy path)** — `cargo run`. Confirm all 6 `pulse-ci-runner-*` rows appear, CPU/mem update ~2s (CPU non-zero-capable after the first poll), all show idle, slice gauge populates, `q`/`Esc` quits and restores the terminal.
 
-- [ ] **Step 5: Commit** — `git commit -am "feat: event loop + live TUI"`
+- [ ] **Step 5: Verify degradation (reviewer point 5) — no panic, terminal survives:**
+  - Socket down: `PITWALL_SOCKET=/nonexistent.sock cargo run` → shows a red `docker: …` banner + empty-state, `q` restores cleanly.
+  - `gh` unavailable: `PATH=/usr/bin cargo run` in an env where `gh` isn't found, or temporarily with an unauthenticated `GH_TOKEN=` — jobs banner appears, resources still render, no crash.
+  - Zero runners: `PITWALL_PREFIX=nomatch- cargo run` → empty-state `"waiting for runners…"`, gauge at 0, `q` restores.
+
+- [ ] **Step 6: Commit** — `git commit -am "feat: event loop + degradation-safe live TUI"`
 
 ---
 
@@ -721,6 +888,12 @@ install:
 
 ## Self-Review
 
-- **Spec coverage:** stack (T1), model/join (T2), cpu/mem math (T3), bollard rootless source + abstraction seam (T4 — source is a plain module; trait extraction deferred until a 2nd source exists, per YAGNI), gh jobs 15s (T5), table+gauge+colors (T6), event loop + error resilience + terminal restore (T7), install + live verify (T8). Non-goals honored (no native runners, no graphs, no config file). ✔
-- **Placeholder scan:** render code in T6 and app loop in T7 are described, not fully code-blocked, because they are the parts most sensitive to exact ratatui 0.30 signatures — implementer writes them against docs.rs at build time. All pure/testable logic IS fully code-blocked. Acceptable.
-- **Type consistency:** `RunnerResource`, `JobInfo`, `RunnerRow`, `Load`, `join`, `runner_index`, `cpu_pct`, `mem_used`, `parse_runs`, `parse_jobs` signatures are consistent across tasks. The `parse_runs → (id,name)` and `humantime` dep are flagged as implement-time decisions with the tested contract held fixed.
+- **Spec coverage:** stack+config (T1), model/join (T2), cpu/mem math (T3), bollard rootless source (T4), gh jobs 15s (T5), table+gauge+colors (T6), event loop + degradation + terminal restore (T7), install + live verify (T8). Non-goals honored (no native runners, no graphs, no config *file*). ✔
+- **Reviewer fixes addressed:**
+  1. **One-shot CPU% retention** — T4 adds `CpuSample` + `cpu_from_samples`, retains the previous poll's counters per container id, ignores the API's zeroed `precpu_stats`, and has a named test `first_poll_zero_then_delta_from_retained_sample`.
+  2. **Join key front-loaded** — T5 Step 1 captures real `gh api …/jobs` payloads and records confirmed shapes (`runner-N` self-hosted, `"GitHub Actions …"` hosted, completed-retains-stale-name) before any parser is written.
+  3. **Queued/completed/hosted excluded** — T5 filters runs with `?status=in_progress`, filters jobs to `in_progress`, and strict-matches `^runner-\d+$` (`runner_index_strict`); test asserts hosted + completed are dropped.
+  4. **Config from the start** — T1 `src/config.rs` centralizes socket path, repo, prefix, and slice cap (env-overridable, default 24 GiB, not hardcoded at use-sites); T4/T5 consume `Config`; success criteria updated.
+  5. **Degradation path** — `ResourceUpdate`/`JobsUpdate` carry `error`; T7 surfaces a status banner + keeps last-known data; T6 renders banner/empty-state; T7 Step 5 explicitly verifies socket-down / gh-down / zero-runners never panic and the terminal restores.
+- **Placeholder scan:** only the `render` body (T6) and the `select!` body (T7) are prose+spec rather than full code — the parts most sensitive to exact ratatui 0.30 signatures, written against docs.rs at build time. All pure/testable logic is fully code-blocked.
+- **Type consistency:** `RunnerResource`, `JobInfo`, `RunnerRow`, `Load`, `join`, `runner_index`, `cpu_pct`, `mem_used`, `Config`(`Clone`), `ResourceUpdate`, `CpuSample`, `cpu_from_samples`, `JobsUpdate`, `parse_runs → (u64,String)`, `parse_jobs`, `View{status}` are consistent across tasks.
