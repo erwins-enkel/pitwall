@@ -1,25 +1,16 @@
-// Consumed by `resource`, `jobs`, and `ui` in later tasks; not yet wired into `main`.
-#[allow(dead_code)]
+mod app;
 mod config;
-
-#[allow(dead_code)]
-mod model;
-
-#[allow(dead_code)]
-mod stats_math;
-
-// `resource::run` has no caller until Task 7 wires it into the event loop.
-#[allow(dead_code)]
-mod resource;
-
-// `jobs::run` has no caller until Task 7 wires it into the event loop.
-#[allow(dead_code)]
 mod jobs;
-
-// `ui::render` has no caller until Task 7 wires it into the event loop.
-#[allow(dead_code)]
+mod model;
+mod resource;
+mod stats_math;
 mod ui;
 
-fn main() {
-    println!("pitwall");
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // ratatui::init installs a panic hook that restores the terminal before unwinding.
+    let terminal = ratatui::init();
+    let res = app::run(terminal).await;
+    ratatui::restore();
+    res
 }
