@@ -1,0 +1,6 @@
+{"total_count":4,"jobs":[
+  {"name":"E2E Tests","status":"in_progress","runner_name":"runner-4","started_at":"2026-07-04T12:25:18Z"},
+  {"name":"Migration Execution Test","status":"completed","runner_name":"GitHub Actions 1000013810","started_at":"2026-07-04T12:22:56Z"},
+  {"name":"Coverage Gate","status":"completed","runner_name":"runner-3","started_at":"2026-07-04T12:24:48Z"},
+  {"name":"Hosted Job","status":"in_progress","runner_name":"GitHub Actions 999","started_at":"2026-07-04T12:26:00Z"}
+]}

@@ -1,0 +1,226 @@
+use crate::model::{elapsed_secs, slice_total_bytes, Load, RunnerRow};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Cell, Gauge, Paragraph, Row, Table};
+use ratatui::Frame;
+use std::time::SystemTime;
+
+const KIB: f64 = 1024.0;
+const MIB: f64 = KIB * 1024.0;
+const GIB: f64 = MIB * 1024.0;
+
+pub struct View<'a> {
+    pub rows: &'a [RunnerRow],
+    pub slice_cap_bytes: u64,
+    pub now: SystemTime,
+    pub status: Option<String>,
+}
+
+pub fn fmt_mem(bytes: u64) -> String {
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1}GiB", bytes / GIB)
+    } else {
+        format!("{:.1}MiB", bytes / MIB)
+    }
+}
+
+pub fn fmt_elapsed(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+fn load_style(load: Load) -> Style {
+    match load {
+        Load::Idle => Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        Load::Busy => Style::new().fg(Color::Green),
+        Load::NearCap => Style::new().fg(Color::Red),
+    }
+}
+
+fn table_row(row: &RunnerRow, now: SystemTime) -> Row<'static> {
+    let cpu = format!("{:.1}%", row.cpu_pct);
+    let mem = format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit));
+    let (job, elapsed) = match &row.job {
+        Some(j) => (
+            format!("{} \u{203a} {}", j.workflow, j.job),
+            fmt_elapsed(elapsed_secs(j.started_at, now)),
+        ),
+        None => ("\u{2014} idle".to_string(), "-".to_string()),
+    };
+    Row::new(vec![
+        Cell::from(row.name.clone()),
+        Cell::from(cpu),
+        Cell::from(mem),
+        Cell::from(job),
+        Cell::from(elapsed),
+    ])
+    .style(load_style(row.load))
+}
+
+fn render_table(frame: &mut Frame, area: Rect, view: &View) {
+    let header = Row::new(vec![
+        "runner",
+        "cpu",
+        "mem",
+        "workflow \u{203a} job",
+        "elapsed",
+    ])
+    .style(Style::new().bold());
+    let rows: Vec<Row> = view.rows.iter().map(|r| table_row(r, view.now)).collect();
+    let widths = [
+        Constraint::Length(20),
+        Constraint::Length(6),
+        Constraint::Length(16),
+        Constraint::Length(20),
+        Constraint::Length(10),
+    ];
+    let table = Table::new(rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+fn render_empty_state(frame: &mut Frame, area: Rect) {
+    // Errors are already surfaced in the banner above; avoid showing them twice.
+    let message = "waiting for runners\u{2026}".to_string();
+    let chunks = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .split(area);
+    let paragraph = Paragraph::new(message).alignment(Alignment::Center);
+    frame.render_widget(paragraph, chunks[1]);
+}
+
+fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
+    let total = slice_total_bytes(view.rows);
+    let ratio = if view.slice_cap_bytes > 0 {
+        (total as f64 / view.slice_cap_bytes as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let cap_gib = (view.slice_cap_bytes as f64 / GIB).round() as u64;
+    let label = format!("{:.1} / {} GiB", total as f64 / GIB, cap_gib);
+    let gauge = Gauge::default()
+        .ratio(ratio)
+        .label(label)
+        .gauge_style(Style::new().fg(Color::Cyan));
+    frame.render_widget(gauge, area);
+}
+
+pub fn render(frame: &mut Frame, view: &View) {
+    let has_banner = view.status.is_some();
+    let mut constraints = vec![Constraint::Length(1)];
+    if has_banner {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(1));
+    constraints.push(Constraint::Length(1));
+    let chunks = Layout::vertical(constraints).split(frame.area());
+
+    let mut idx = 0;
+    let title_area = chunks[idx];
+    idx += 1;
+    frame.render_widget(Paragraph::new("pitwall"), title_area);
+
+    if has_banner {
+        let banner_area = chunks[idx];
+        idx += 1;
+        let banner = Paragraph::new(view.status.clone().unwrap_or_default())
+            .style(Style::new().fg(Color::Red).bold());
+        frame.render_widget(banner, banner_area);
+    }
+
+    let body_area = chunks[idx];
+    idx += 1;
+    if view.rows.is_empty() {
+        render_empty_state(frame, body_area);
+    } else {
+        render_table(frame, body_area, view);
+    }
+
+    let gauge_area = chunks[idx];
+    render_gauge(frame, gauge_area, view);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Load, RunnerRow};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::time::SystemTime;
+
+    #[test]
+    fn formats_mem_and_elapsed() {
+        assert_eq!(fmt_mem(1024 * 1024 * 1024), "1.0GiB");
+        assert_eq!(fmt_mem(42 * 1024 * 1024), "42.0MiB");
+        assert_eq!(fmt_elapsed(75), "01:15");
+        assert_eq!(fmt_elapsed(3661), "1:01:01");
+    }
+
+    #[test]
+    fn renders_without_panic_and_shows_runner() {
+        let rows = vec![RunnerRow {
+            name: "pulse-ci-runner-1".into(),
+            cpu_pct: 0.5,
+            mem_bytes: 47 * 1024 * 1024,
+            mem_limit: 8 * 1024 * 1024 * 1024,
+            job: None,
+            load: Load::Idle,
+        }];
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &rows,
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                },
+            );
+        })
+        .unwrap();
+        let content = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(content.contains("pulse-ci-runner-1"));
+        assert!(content.contains("idle"));
+    }
+
+    #[test]
+    fn empty_rows_with_status_shows_banner_not_blank() {
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: Some("docker: unreachable".into()),
+                },
+            );
+        })
+        .unwrap();
+        let content = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(content.contains("docker: unreachable"));
+    }
+}
