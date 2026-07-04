@@ -23,8 +23,7 @@ struct AppState {
 /// Degradation: a source error never clears last-known-good data — only the
 /// two `*_err` fields change, and the newest error (docker takes precedence
 /// over gh) becomes the status banner passed to `ui::render`.
-pub async fn run(mut terminal: ratatui::DefaultTerminal) -> anyhow::Result<()> {
-    let cfg = Config::from_env();
+pub async fn run(mut terminal: ratatui::DefaultTerminal, cfg: Config) -> anyhow::Result<()> {
     let slice_cap_bytes = cfg.slice_cap_bytes;
 
     let (tx_res, mut rx_res) = mpsc::channel::<ResourceUpdate>(8);

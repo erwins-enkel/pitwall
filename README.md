@@ -48,14 +48,44 @@ Quit with `q`, `Esc`, or `Ctrl-C` — the terminal is restored on exit.
 
 ## Configuration
 
-All settings are env vars, all optional:
+Every setting is optional and resolved in this order (first wins): **env var →
+config file → built-in default**.
 
-| Var | Default |
-|---|---|
-| `PITWALL_SOCKET` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
-| `PITWALL_REPO` | `owner/repo` (set this to your runners' repo) |
-| `PITWALL_PREFIX` | `ci-runner-` |
-| `PITWALL_SLICE_CAP_GIB` | `24` |
+| Setting | Env var | File key | Default |
+|---|---|---|---|
+| socket | `PITWALL_SOCKET` | `socket` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
+| repo | `PITWALL_REPO` | `repo` | `owner/repo` (set this to your runners' repo) |
+| prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` |
+| slice cap (GiB) | `PITWALL_SLICE_CAP_GIB` | `slice_cap_gib` | `24` |
+
+An empty env var (e.g. `PITWALL_REPO=`) is treated as unset, falling through to
+the file value, then the default.
+
+### Config file
+
+An optional TOML file provides persistent settings. It is read from
+`$XDG_CONFIG_HOME/pitwall/config.toml` (falling back to
+`~/.config/pitwall/config.toml`); set `PITWALL_CONFIG=/path/to/config.toml` to
+point elsewhere. All keys are optional:
+
+```toml
+# ~/.config/pitwall/config.toml
+socket        = "/run/user/1000/docker.sock"
+repo          = "owner/repo"
+prefix        = "ci-runner-"
+slice_cap_gib = 24
+```
+
+Notes:
+
+- **`socket` beats `DOCKER_HOST`.** The full socket order is `PITWALL_SOCKET` →
+  file `socket` → `DOCKER_HOST` → `/run/user/$UID/docker.sock`. The file value
+  intentionally overrides the ambient `DOCKER_HOST` env var, since it is
+  deliberate pitwall configuration rather than an ambient docker setting.
+- A malformed file, or one with an unknown key, is a hard error: pitwall reports
+  it and exits without starting the UI.
+- The default file is optional — its absence is fine. A `PITWALL_CONFIG` path
+  that is set but missing is an error.
 
 ## How it works
 
