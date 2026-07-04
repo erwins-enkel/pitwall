@@ -92,16 +92,31 @@ fn load_style(load: Load, p: &Palette) -> Style {
 }
 
 const COL_SPACING: u16 = 1;
+const RUNNER_IDX: usize = 0;
 const JOB_IDX: usize = 5;
 const BRANCH_IDX: usize = 6;
+/// Floor for the runner column so the `runner` header never clips.
+const RUNNER_HEADER_W: usize = 6; // "runner"
 
-/// Column constraints for the runner table. The `job` and `branch` columns are
-/// `Min` so they absorb leftover terminal width; the rest are fixed. This single
-/// array feeds both the rendered `Table` and `column_layout` so the width used to
-/// truncate cells can never diverge from the width ratatui actually allocates.
-fn column_widths() -> [Constraint; 8] {
+/// Width for the runner column: the widest runner name in `rows`, floored at the `runner`
+/// header width. Content-derived so the distinguishing `-N` suffix stays visible for any
+/// `PITWALL_PREFIX` — a fixed width would re-clip a longer prefix. The `Length` this feeds
+/// is shrunk by ratatui's solver under space pressure (no manual bound here); the rendered
+/// width is read back from `column_layout` to drive front-truncation.
+fn runner_col_width(rows: &[RunnerRow]) -> u16 {
+    rows.iter()
+        .map(|r| UnicodeWidthStr::width(r.name.as_str()))
+        .fold(RUNNER_HEADER_W, usize::max) as u16
+}
+
+/// Column constraints for the runner table. `runner` is a `Length` sized to the widest
+/// name (`runner_w`, from `runner_col_width`); `job` and `branch` are `Min` so they absorb
+/// leftover terminal width; the rest are fixed. This single array feeds both the rendered
+/// `Table` and `column_layout` so the width used to truncate cells can never diverge from
+/// the width ratatui actually allocates.
+fn column_widths(runner_w: u16) -> [Constraint; 8] {
     [
-        Constraint::Length(14),
+        Constraint::Length(runner_w),
         Constraint::Length(6),
         Constraint::Length(SPARK_WIDTH as u16),
         Constraint::Length(16),
@@ -116,8 +131,8 @@ fn column_widths() -> [Constraint; 8] {
 /// `Layout::horizontal(widths).flex(Flex::Start).spacing(..)` call `Table` uses
 /// internally (verified against ratatui-widgets `table.rs`). Reading widths back
 /// from here means we truncate to exactly what gets rendered.
-fn column_layout(area: Rect) -> [Rect; 8] {
-    Layout::horizontal(column_widths())
+fn column_layout(area: Rect, runner_w: u16) -> [Rect; 8] {
+    Layout::horizontal(column_widths(runner_w))
         .flex(Flex::Start)
         .spacing(COL_SPACING)
         .areas(area)
@@ -149,10 +164,40 @@ fn truncate_ellipsis(s: &str, max: usize) -> String {
     out
 }
 
+/// Like `truncate_ellipsis` but keeps the **tail**, prepending `…`, so the runner cell's
+/// distinguishing numeric suffix (`…runner-1`) survives when the column is squeezed —
+/// the number is exactly what tail-truncation would drop. At most `max` columns wide.
+fn truncate_ellipsis_front(s: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    // Walk from the end, keeping as many trailing chars as fit; leave one column for `…`.
+    let budget = max - 1;
+    let mut kept: Vec<char> = Vec::new();
+    let mut width = 0usize;
+    for c in s.chars().rev() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + cw > budget {
+            break;
+        }
+        kept.push(c);
+        width += cw;
+    }
+    kept.reverse();
+    let mut out = String::with_capacity(kept.len() + 1);
+    out.push('\u{2026}');
+    out.extend(kept);
+    out
+}
+
 fn table_row(
     row: &RunnerRow,
     now: SystemTime,
     p: &Palette,
+    runner_w: usize,
     job_w: usize,
     branch_w: usize,
 ) -> Row<'static> {
@@ -212,7 +257,8 @@ fn table_row(
         ),
     };
     Row::new(vec![
-        Cell::from(row.name.clone()),
+        // Front-truncate so the distinguishing `-N` suffix survives a squeezed column.
+        Cell::from(truncate_ellipsis_front(&row.name, runner_w)),
         Cell::from(cpu),
         Cell::from(cpu_spark),
         mem_cell,
@@ -241,15 +287,19 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     // narrow terminals instead of the fixed columns dropping off the right edge.
     // Read their allocated widths back from the same layout the Table uses, then
     // truncate those cells to fit (ratatui hard-clips without an ellipsis).
-    let cols = column_layout(area);
+    let runner_w = runner_col_width(view.rows);
+    let cols = column_layout(area, runner_w);
+    // Read the *rendered* widths back so truncation matches exactly what ratatui drew
+    // (the solver shrinks the runner `Length` on narrow terminals).
+    let runner_cell_w = cols[RUNNER_IDX].width as usize;
     let job_w = cols[JOB_IDX].width as usize;
     let branch_w = cols[BRANCH_IDX].width as usize;
     let rows: Vec<Row> = view
         .rows
         .iter()
-        .map(|r| table_row(r, view.now, p, job_w, branch_w))
+        .map(|r| table_row(r, view.now, p, runner_cell_w, job_w, branch_w))
         .collect();
-    let table = Table::new(rows, column_widths())
+    let table = Table::new(rows, column_widths(runner_w))
         .header(header)
         .column_spacing(COL_SPACING)
         .style(Style::new().fg(p.text).bg(p.base));
@@ -480,17 +530,37 @@ mod tests {
     #[test]
     fn column_layout_matches_ratatui_solver() {
         // Widths/positions read back from ratatui's own solver (locked from the
-        // real layout). job gets the odd leftover column, branch one less.
-        let c = column_layout(Rect::new(0, 0, 120, 1));
-        assert_eq!((c[JOB_IDX].x, c[JOB_IDX].width), (81, 14));
-        assert_eq!((c[BRANCH_IDX].x, c[BRANCH_IDX].width), (96, 13));
+        // real layout) with a realistic 17-col runner request. job gets the odd
+        // leftover column, branch one less.
+        const RW: u16 = 17; // pulse-ci-runner-N
+        let c = column_layout(Rect::new(0, 0, 120, 1), RW);
+        assert_eq!(c[RUNNER_IDX].width, 17); // full name fits
+        assert_eq!((c[JOB_IDX].x, c[JOB_IDX].width), (84, 12));
+        assert_eq!((c[BRANCH_IDX].x, c[BRANCH_IDX].width), (97, 12));
 
-        let c = column_layout(Rect::new(0, 0, 200, 1));
-        assert_eq!(c[JOB_IDX].width, 54);
-        assert_eq!(c[BRANCH_IDX].width, 53);
+        let c = column_layout(Rect::new(0, 0, 200, 1), RW);
+        assert_eq!(c[RUNNER_IDX].width, 17);
+        assert_eq!(c[JOB_IDX].width, 52);
+        assert_eq!(c[BRANCH_IDX].width, 52);
+
+        // The runner `Length` is shrunk by the solver on narrow terminals — this is
+        // exactly the width the renderer reads back to front-truncate. Locking these
+        // guards `runner_col_width`/render against silently diverging.
+        assert_eq!(
+            column_layout(Rect::new(0, 0, 113, 1), RW)[RUNNER_IDX].width,
+            17
+        );
+        assert_eq!(
+            column_layout(Rect::new(0, 0, 100, 1), RW)[RUNNER_IDX].width,
+            9
+        );
+        assert_eq!(
+            column_layout(Rect::new(0, 0, 80, 1), RW)[RUNNER_IDX].width,
+            6
+        );
 
         // Narrow: flex columns bottom out at their Min minimums, never underflow.
-        let c = column_layout(Rect::new(0, 0, 64, 1));
+        let c = column_layout(Rect::new(0, 0, 64, 1), RW);
         assert_eq!(c[JOB_IDX].width, 12);
         assert_eq!(c[BRANCH_IDX].width, 8);
     }
@@ -528,6 +598,112 @@ mod tests {
             .sum();
         assert!(width <= 5);
         assert!(r.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_ellipsis_front_fits_untouched() {
+        assert_eq!(truncate_ellipsis_front("abc", 5), "abc");
+        assert_eq!(truncate_ellipsis_front("abcde", 5), "abcde"); // exact fit, no ellipsis
+        assert_eq!(truncate_ellipsis_front("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_ellipsis_front_keeps_the_tail() {
+        // The number is the distinguishing suffix — it must survive.
+        assert_eq!(
+            truncate_ellipsis_front("pulse-ci-runner-1", 9),
+            "\u{2026}runner-1"
+        );
+        assert_eq!(
+            truncate_ellipsis_front("pulse-ci-runner-1", 6),
+            "\u{2026}ner-1"
+        );
+        let r = truncate_ellipsis_front("pulse-ci-runner-1", 9);
+        assert_eq!(UnicodeWidthStr::width(r.as_str()), 9);
+        assert!(r.starts_with('\u{2026}'));
+        assert!(r.ends_with("-1"));
+    }
+
+    #[test]
+    fn truncate_ellipsis_front_wide_glyphs_stay_within_max() {
+        // Trailing CJK glyphs are 2 columns each; result must not exceed max.
+        let r = truncate_ellipsis_front("test \u{65e5}\u{672c}\u{8a9e}", 6);
+        assert!(UnicodeWidthStr::width(r.as_str()) <= 6);
+        assert!(r.starts_with('\u{2026}'));
+    }
+
+    #[test]
+    fn runner_col_width_derives_from_names() {
+        // Widest name when it fits.
+        let rows = vec![
+            busy_row("pulse-ci-runner-1", "CI", "t", "main", 1),
+            busy_row("pulse-ci-runner-10", "CI", "t", "main", 1),
+        ];
+        assert_eq!(runner_col_width(&rows), 18); // "pulse-ci-runner-10"
+                                                 // Floors at the "runner" header width for short names / no rows.
+        assert_eq!(runner_col_width(&[busy_row("r1", "CI", "t", "main", 1)]), 6);
+        assert_eq!(runner_col_width(&[]), 6);
+    }
+
+    /// Reads the runner column's cells at the first data row into a trimmed string.
+    fn runner_cell(rows: &[RunnerRow], width: u16) -> String {
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows,
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "pulse-ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                },
+            );
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let cols = column_layout(Rect::new(0, 0, width, 1), runner_col_width(rows));
+        let r = cols[RUNNER_IDX];
+        let data_y = 2; // no banner: title y=0, header y=1, first data row y=2
+        (r.x..r.x + r.width)
+            .map(|x| buf[(x, data_y)].symbol().to_string())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn squeezed_runner_column_keeps_the_number() {
+        // The regression: at ordinary 80-110 col widths the solver shrinks runner
+        // below the 17-col name, and front-truncation must preserve the trailing `-N`.
+        let rows = vec![busy_row("pulse-ci-runner-1", "CI", "test", "main", 30)];
+        for width in [100u16, 80] {
+            let cell = runner_cell(&rows, width);
+            assert!(
+                cell.starts_with('\u{2026}'),
+                "width {width}: runner cell should be front-truncated, got {cell:?}"
+            );
+            assert!(
+                cell.ends_with("-1"),
+                "width {width}: runner number must survive, got {cell:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_runner_column_shows_full_name_with_number() {
+        // The user's actual regime (~200 cols): full name, number included, no ellipsis.
+        let rows = vec![busy_row("pulse-ci-runner-1", "CI", "test", "main", 30)];
+        for width in [160u16, 200] {
+            let cell = runner_cell(&rows, width);
+            assert_eq!(cell, "pulse-ci-runner-1", "width {width}");
+        }
     }
 
     #[test]
@@ -705,7 +881,7 @@ mod tests {
         let buf = term.backend().buffer().clone();
         // No banner: title y=0, header y=1, first data row y=2.
         let data_y = 2;
-        let cols = column_layout(Rect::new(0, 0, width, 1));
+        let cols = column_layout(Rect::new(0, 0, width, 1), runner_col_width(&rows));
         // job (12 wide) and branch (8 wide) are both narrower than their content,
         // so the ellipsis must be the trailing glyph at each column's last cell.
         let job_last_x = cols[JOB_IDX].x + cols[JOB_IDX].width - 1;
