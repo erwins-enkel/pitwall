@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 mod config;
 
+#[allow(dead_code)]
+mod model;
+
 fn main() {
     println!("pitwall");
 }
