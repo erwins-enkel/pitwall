@@ -19,6 +19,12 @@ pub struct Config {
     pub flavor: Flavor,
     pub warn_ratio: f64,
     pub crit_ratio: f64,
+    /// Repos to poll for in-progress job detail. Defaults to `[repo]`; `app`
+    /// augments this with native runners' repo-scopes (deduplicated) at startup.
+    pub repos: Vec<String>,
+    /// Orgs to poll for runner busy status (native org-scoped runners). Empty by
+    /// default; populated from native discovery at startup.
+    pub orgs: Vec<String>,
 }
 
 const DEFAULT_WARN_PCT: u64 = 85;
@@ -174,6 +180,8 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
     );
 
     Config {
+        repos: vec![repo.clone()],
+        orgs: vec![],
         socket_path,
         repo,
         prefix,

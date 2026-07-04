@@ -1,28 +1,40 @@
 # pitwall
 
-btop-like terminal UI for self-hosted GitHub Actions runners: live CPU/mem per runner container, joined with the workflow › job currently running.
+btop-like terminal UI for self-hosted GitHub Actions runners: live CPU/mem per runner, joined with the workflow › job currently running. Covers both the docker "pulse" runners and the box's **native (non-docker) `Runner.Listener` runners**.
 
 ## What you see
 
-A table, one row per runner:
+A table, one row per runner (docker runners first, then native):
 
 | runner | cpu | ~cpu | mem | ~mem | workflow › job | elapsed |
 |---|---|---|---|---|---|---|
 
-- **runner** — container name, e.g. `ci-runner-1`.
-- **cpu / mem** — live usage from rootless docker (mem shown as `used/limit`).
+- **runner** — docker container name (e.g. `pulse-ci-runner-1`) or, for native runners, the systemd unit's registration segment (e.g. `ltdovr`, `scoop-vanscout`).
+- **cpu / mem** — live usage. Docker: from the rootless docker socket. Native: from the systemd unit's cgroup v2 stats. Memory is the working set (`inactive_file` subtracted) on both, shown as `used/limit`, or just `used` for uncapped native runners.
 - **~cpu / ~mem** — block-char sparklines of the last ~40s (20 samples at the 2s
   poll). CPU auto-scales to its window max with a 10% floor, so idle jitter reads
-  as a flat baseline; mem scales to the container limit. History is in-memory and
-  resets on restart.
-- **workflow › job** — `— idle` when no in-progress job is joined, else `Workflow Name › Job Name`.
+  as a flat baseline; mem scales to the limit (flat for uncapped native runners).
+  History is in-memory and resets on restart.
+- **workflow › job** — `— idle` when no in-progress job is joined, `busy` when a runner is busy but no per-job detail is available (org-scoped runners; see below), else `Workflow Name › Job Name`.
 - **elapsed** — ticking duration since the job started; `-` when idle.
 
-Rows are colored by load using the Catppuccin palette over a full Catppuccin background: muted gray = idle, green = busy, red = near-cap (mem ≥ crit % of the container limit — the whole row goes red). As an early warning *below* near-cap, the `mem` cell alone turns the warn color (yellow) while its memory is in the warn band (≥ warn %, < crit %), so a busy runner stays green with just a yellow mem cell. The gauge at the bottom shows summed runner memory against a configurable slice cap, using the same thresholds: teal normally, yellow (` ⚠ warn`) in the warn band, red (` ⚠ NEAR CAP`) at the cap. Pick a flavor with `PITWALL_THEME` (see [Configuration](#configuration)). Colors assume a truecolor terminal; on 16/256-color terminals they downsample to the nearest available color.
+Rows are colored by load using the Catppuccin palette over a full Catppuccin background: muted gray = idle, green = busy, red = near-cap (mem ≥ crit % of a finite limit — the whole row goes red). As an early warning *below* near-cap, the `mem` cell alone turns the warn color (yellow) while its memory is in the warn band (≥ warn %, < crit %), so a busy runner stays green with just a yellow mem cell. Native runners are uncapped, so they never enter the warn/near-cap tiers. The gauge at the bottom shows summed **docker** (pulse-slice) runner memory against a configurable slice cap, using the same thresholds: teal normally, yellow (` ⚠ warn`) in the warn band, red (` ⚠ NEAR CAP`) at the cap; native runners live in a different slice and don't count toward it. Pick a flavor with `PITWALL_THEME` (see [Configuration](#configuration)). Colors assume a truecolor terminal; on 16/256-color terminals they downsample to the nearest available color.
+
+## Native runners
+
+Native runners are discovered automatically at startup by enumerating `actions.runner.*.service` systemd units and reading each unit's `.runner` config (for its GitHub scope) and cgroup (for stats). Notes:
+
+- **Discovery is one-shot** — adding or removing a runner needs a pitwall restart.
+- **Repo-scoped** native runners get full `workflow › job` detail, matched by GitHub runner name (`.runner` `agentName`) within their repo.
+- **Org-scoped** runners (e.g. `ltdovr`) can only ever show **busy/idle with no `workflow › job` detail** — GitHub exposes no cheap per-runner job endpoint at org scope. This is by design, not a bug, and holds even after granting `admin:org`.
+- Org busy status uses `orgs/{org}/actions/runners`, which needs the `admin:org` gh scope. Without it the call 403s and the org runner simply shows idle — no error banner. Grant it with `gh auth refresh -h github.com -s admin:org` if you want org busy status.
+- If pitwall runs as a different user than owns a runner install and can't read its `.runner`, that runner still appears with live CPU/mem but always renders idle (no job matching).
+- A native runner whose unit stops (its cgroup disappears) simply drops off the table that cycle, like an ephemeral docker container deregistering — not an error. A genuine cgroup read failure (e.g. a permission change) does raise the status banner and keeps the last-known-good rows on screen.
+- Off-box or in CI (no systemd / no matching units), native discovery yields nothing and pitwall runs docker-only.
 
 ## Requirements
 
-- Linux
+- Linux with cgroup v2 (native runners read `/sys/fs/cgroup`) and `systemctl` (for native runner discovery — optional; absent = docker-only)
 - A reachable rootless Docker socket (default `/run/user/$UID/docker.sock`)
 - An authenticated `gh` CLI (used for job data)
 

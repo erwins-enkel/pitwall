@@ -26,11 +26,15 @@ fn push_capped(v: &mut Vec<f64>, x: f64) {
 }
 
 impl History {
-    /// Appends one sample per runner in the snapshot and prunes series for
-    /// runners absent from it (deregistered ephemeral runners). Guards a zero
-    /// `mem_limit` (resource.rs sets `unwrap_or(0)`) to avoid divide-by-zero.
-    pub fn record(&mut self, resources: &[RunnerResource]) {
-        for r in resources {
+    /// Appends one sample per runner in `sample`, then prunes series for runners
+    /// absent from `retain`. Splitting the two lets one source (docker/native)
+    /// append only its own runners at its own 2s cadence — one sample per 2s, so
+    /// the window stays ~40s — while pruning against the union of both sources so
+    /// the other source's series are never wrongly dropped. Guards a zero
+    /// `mem_limit` (uncapped native runners) to avoid divide-by-zero. Pass the
+    /// same slice for both to record a full snapshot.
+    pub fn record(&mut self, sample: &[RunnerResource], retain: &[RunnerResource]) {
+        for r in sample {
             let s = self.series.entry(r.name.clone()).or_default();
             push_capped(&mut s.cpu, r.cpu_pct);
             let frac = if r.mem_limit > 0 {
@@ -41,7 +45,7 @@ impl History {
             push_capped(&mut s.mem_frac, frac);
         }
         self.series
-            .retain(|name, _| resources.iter().any(|r| &r.name == name));
+            .retain(|name, _| retain.iter().any(|r| &r.name == name));
     }
 
     /// CPU% series for a runner, oldest→newest; empty if unknown.
@@ -66,14 +70,27 @@ mod tests {
             cpu_pct: cpu,
             mem_bytes: mem,
             mem_limit: limit,
+            key: None,
+            kind: crate::model::SourceKind::Docker,
         }
+    }
+
+    /// Full-snapshot record: sample and retain are the same set (the common case).
+    fn snap(h: &mut History, resources: &[RunnerResource]) {
+        h.record(resources, resources);
     }
 
     #[test]
     fn records_one_point_per_runner_per_snapshot() {
         let mut h = History::default();
-        h.record(&[res("r-1", 10.0, 100, 1000), res("r-2", 20.0, 200, 1000)]);
-        h.record(&[res("r-1", 12.0, 150, 1000), res("r-2", 22.0, 250, 1000)]);
+        snap(
+            &mut h,
+            &[res("r-1", 10.0, 100, 1000), res("r-2", 20.0, 200, 1000)],
+        );
+        snap(
+            &mut h,
+            &[res("r-1", 12.0, 150, 1000), res("r-2", 22.0, 250, 1000)],
+        );
         assert_eq!(h.cpu("r-1"), &[10.0, 12.0]);
         assert_eq!(h.cpu("r-2"), &[20.0, 22.0]);
         assert_eq!(h.mem_frac("r-1"), &[0.1, 0.15]);
@@ -83,7 +100,7 @@ mod tests {
     fn bounded_to_window_with_fifo_eviction() {
         let mut h = History::default();
         for i in 0..(WINDOW as u64 + 5) {
-            h.record(&[res("r-1", i as f64, 0, 1000)]);
+            snap(&mut h, &[res("r-1", i as f64, 0, 1000)]);
         }
         let cpu = h.cpu("r-1");
         assert_eq!(cpu.len(), WINDOW);
@@ -95,16 +112,40 @@ mod tests {
     #[test]
     fn prunes_absent_runners() {
         let mut h = History::default();
-        h.record(&[res("r-1", 1.0, 0, 1000), res("r-2", 2.0, 0, 1000)]);
-        h.record(&[res("r-1", 3.0, 0, 1000)]); // r-2 gone
+        snap(
+            &mut h,
+            &[res("r-1", 1.0, 0, 1000), res("r-2", 2.0, 0, 1000)],
+        );
+        snap(&mut h, &[res("r-1", 3.0, 0, 1000)]); // r-2 gone
         assert_eq!(h.cpu("r-1"), &[1.0, 3.0]);
         assert!(h.cpu("r-2").is_empty());
     }
 
     #[test]
+    fn scoped_record_samples_one_source_but_prunes_by_union() {
+        // Simulates the two-source app: each poll appends only its own runner,
+        // but retains the union so the other source's series survive.
+        let mut h = History::default();
+        let docker = [res("pulse-ci-runner-1", 10.0, 100, 1000)];
+        let native = [res("ltdovr", 20.0, 100, 0)];
+        let union = [docker[0].clone(), native[0].clone()];
+        // Docker poll: append docker only, retain union.
+        h.record(&docker, &union);
+        // Native poll: append native only, retain union.
+        h.record(&native, &union);
+        // One sample each — no cross-source duplicate inflating the series.
+        assert_eq!(h.cpu("pulse-ci-runner-1"), &[10.0]);
+        assert_eq!(h.cpu("ltdovr"), &[20.0]);
+        // A subsequent docker poll must NOT prune the native series.
+        h.record(&docker, &union);
+        assert_eq!(h.cpu("pulse-ci-runner-1"), &[10.0, 10.0]);
+        assert_eq!(h.cpu("ltdovr"), &[20.0]);
+    }
+
+    #[test]
     fn zero_mem_limit_yields_zero_fraction() {
         let mut h = History::default();
-        h.record(&[res("r-1", 0.0, 500, 0)]);
+        snap(&mut h, &[res("r-1", 0.0, 500, 0)]);
         assert_eq!(h.mem_frac("r-1"), &[0.0]);
     }
 

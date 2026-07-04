@@ -166,7 +166,12 @@ fn table_row(
         .fold(0.0_f64, f64::max)
         .max(CPU_SPARK_FLOOR);
     let cpu_spark = spark(&row.cpu_hist, cpu_max, SPARK_WIDTH);
-    let mem = format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit));
+    // Uncapped runners (native cgroups, limit 0) show usage alone, not `X/0.0MiB`.
+    let mem = if row.mem_limit == 0 {
+        fmt_mem(row.mem_bytes)
+    } else {
+        format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit))
+    };
     let mem_spark = spark(&row.mem_hist, 1.0, SPARK_WIDTH);
     // Warn memory pressure is signalled on the mem cell alone (warn color),
     // overriding the row's job-state color for that one cell so a busy runner
@@ -195,6 +200,10 @@ fn table_row(
                 branch,
                 fmt_elapsed(elapsed_secs(j.started_at, now)),
             )
+        }
+        // Busy without detail (org runners) reads "busy"; otherwise idle.
+        None if matches!(row.load, Load::Busy) => {
+            ("busy".to_string(), "-".to_string(), "-".to_string())
         }
         None => (
             "\u{2014} idle".to_string(),
@@ -356,7 +365,7 @@ pub fn render(frame: &mut Frame, view: &View) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Load, MemLevel, RunnerRow};
+    use crate::model::{Load, MemLevel, RunnerRow, SourceKind};
     use crate::theme::{Flavor, Palette};
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -374,6 +383,7 @@ mod tests {
             job: None,
             load,
             mem_level,
+            kind: SourceKind::Docker,
             cpu_hist: vec![],
             mem_hist: vec![],
         }
@@ -531,6 +541,7 @@ mod tests {
                 job: None,
                 load: Load::Idle,
                 mem_level: MemLevel::Normal,
+                kind: SourceKind::Docker,
                 cpu_hist: vec![],
                 mem_hist: vec![],
             },
@@ -547,6 +558,7 @@ mod tests {
                 }),
                 load: Load::Busy,
                 mem_level: MemLevel::Normal,
+                kind: SourceKind::Docker,
                 cpu_hist: vec![],
                 mem_hist: vec![],
             },
@@ -558,6 +570,29 @@ mod tests {
         assert!(content.contains("branch"));
         assert!(content.contains("main"));
         assert!(content.contains("elapsed"));
+    }
+
+    #[test]
+    fn native_row_hides_zero_limit_and_shows_busy_without_detail() {
+        let rows = vec![RunnerRow {
+            name: "ltdovr".into(),
+            cpu_pct: 12.0,
+            mem_bytes: 100 * 1024 * 1024,
+            mem_limit: 0, // uncapped native cgroup
+            job: None,
+            load: Load::Busy, // busy via org endpoint, no workflow›job
+            mem_level: MemLevel::Normal,
+            kind: SourceKind::Native,
+            cpu_hist: vec![],
+            mem_hist: vec![],
+        }];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        let content = text(&term);
+        assert!(content.contains("ltdovr"));
+        assert!(content.contains("busy"));
+        assert!(content.contains("100.0MiB"));
+        // No `/0.0MiB` denominator for uncapped runners.
+        assert!(!content.contains("/0.0MiB"));
     }
 
     fn busy_row(
@@ -579,6 +614,8 @@ mod tests {
                 started_at: SystemTime::now() - std::time::Duration::from_secs(elapsed_secs),
             }),
             load: Load::Busy,
+            mem_level: MemLevel::Normal,
+            kind: SourceKind::Docker,
             cpu_hist: vec![],
             mem_hist: vec![],
         }
@@ -599,6 +636,8 @@ mod tests {
                     prefix: "ci-runner-",
                     matched_seen: rows.len(),
                     unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
                 },
             );
         })
@@ -657,6 +696,8 @@ mod tests {
                     prefix: "ci-runner-",
                     matched_seen: rows.len(),
                     unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
                 },
             );
         })
