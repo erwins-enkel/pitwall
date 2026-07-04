@@ -100,6 +100,20 @@ colors always agree.
 - No event-loop, timer, or channel changes. Classification is purely at render
   time.
 
+### Signature-change fan-out
+
+Changing `join`'s signature touches its only call site and its existing tests —
+all updated together so the build stays green:
+
+- `src/app.rs:105` — sole `join(...)` call site; pass the two threshold args.
+- `src/model.rs` — the four existing `join(...)` tests (`no_job_is_idle`,
+  `job_present_is_busy`, `high_mem_is_near_cap`,
+  `rows_sorted_by_index_and_slice_summed`) each gain the two args, passed the
+  defaults `0.75, 0.90` so assertions stay unchanged.
+- Regression guard: default `crit = 0.90` reproduces the current hardcoded
+  `>= 0.9` rule at `model.rs:59`; the old literal is removed without shifting the
+  critical threshold.
+
 ### Docs (`README.md`)
 
 - Update the load-color sentence to include the yellow warn tier.
