@@ -16,6 +16,10 @@ mod resource;
 #[allow(dead_code)]
 mod jobs;
 
+// `ui::render` has no caller until Task 7 wires it into the event loop.
+#[allow(dead_code)]
+mod ui;
+
 fn main() {
     println!("pitwall");
 }
