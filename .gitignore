@@ -5,3 +5,8 @@ node_modules/
 .env.*
 dist/
 build/
+
+
+# Added by cargo
+
+/target
