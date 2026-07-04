@@ -5,6 +5,9 @@ mod config;
 #[allow(dead_code)]
 mod model;
 
+#[allow(dead_code)]
+mod stats_math;
+
 fn main() {
     println!("pitwall");
 }
