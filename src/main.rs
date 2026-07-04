@@ -8,6 +8,10 @@ mod model;
 #[allow(dead_code)]
 mod stats_math;
 
+// `resource::run` has no caller until Task 7 wires it into the event loop.
+#[allow(dead_code)]
+mod resource;
+
 fn main() {
     println!("pitwall");
 }
