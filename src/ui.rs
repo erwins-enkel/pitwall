@@ -1,7 +1,8 @@
 use crate::model::{elapsed_secs, slice_total_bytes, Load, RunnerRow};
+use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Cell, Gauge, Paragraph, Row, Table};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
 use ratatui::Frame;
 use std::time::SystemTime;
 
@@ -22,6 +23,7 @@ pub struct View<'a> {
     pub slice_cap_bytes: u64,
     pub now: SystemTime,
     pub status: Option<String>,
+    pub palette: &'a Palette,
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -66,15 +68,19 @@ fn spark(values: &[f64], max: f64, width: usize) -> String {
     s
 }
 
-fn load_style(load: Load) -> Style {
+fn load_style(load: Load, p: &Palette) -> Style {
+    let base = Style::new().bg(p.base);
     match load {
-        Load::Idle => Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-        Load::Busy => Style::new().fg(Color::Green),
-        Load::NearCap => Style::new().fg(Color::Red),
+        // DIM sharpens idle rows on a dark base but washes them out on a light
+        // one, so light flavors (Latte) rely on the idle color alone.
+        Load::Idle if p.is_light => base.fg(p.idle),
+        Load::Idle => base.fg(p.idle).add_modifier(Modifier::DIM),
+        Load::Busy => base.fg(p.busy),
+        Load::NearCap => base.fg(p.near_cap),
     }
 }
 
-fn table_row(row: &RunnerRow, now: SystemTime) -> Row<'static> {
+fn table_row(row: &RunnerRow, now: SystemTime, p: &Palette) -> Row<'static> {
     let cpu = format!("{:.1}%", row.cpu_pct);
     // CPU has no per-runner cap in the model, so scale to the window max with a
     // floor. Mem is already a 0..1 fraction of the limit, so scale to 1.0.
@@ -116,10 +122,11 @@ fn table_row(row: &RunnerRow, now: SystemTime) -> Row<'static> {
         Cell::from(branch),
         Cell::from(elapsed),
     ])
-    .style(load_style(row.load))
+    .style(load_style(row.load, p))
 }
 
 fn render_table(frame: &mut Frame, area: Rect, view: &View) {
+    let p = view.palette;
     let header = Row::new(vec![
         "runner",
         "cpu",
@@ -130,10 +137,14 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
         "branch",
         "elapsed",
     ])
-    .style(Style::new().bold());
-    let rows: Vec<Row> = view.rows.iter().map(|r| table_row(r, view.now)).collect();
+    .style(Style::new().fg(p.text).bg(p.base).bold());
     // job & branch flex to absorb slack, so the layout degrades gracefully on
     // narrow terminals instead of the fixed columns dropping off the right edge.
+    let rows: Vec<Row> = view
+        .rows
+        .iter()
+        .map(|r| table_row(r, view.now, p))
+        .collect();
     let widths = [
         Constraint::Length(14),
         Constraint::Length(6),
@@ -144,11 +155,14 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
         Constraint::Min(8),
         Constraint::Length(10),
     ];
-    let table = Table::new(rows, widths).header(header).column_spacing(1);
+    let table = Table::new(rows, widths)
+        .header(header)
+        .column_spacing(1)
+        .style(Style::new().fg(p.text).bg(p.base));
     frame.render_widget(table, area);
 }
 
-fn render_empty_state(frame: &mut Frame, area: Rect) {
+fn render_empty_state(frame: &mut Frame, area: Rect, p: &Palette) {
     // Errors are already surfaced in the banner above; avoid showing them twice.
     let message = "waiting for runners\u{2026}".to_string();
     let chunks = Layout::vertical([
@@ -157,7 +171,9 @@ fn render_empty_state(frame: &mut Frame, area: Rect) {
         Constraint::Fill(1),
     ])
     .split(area);
-    let paragraph = Paragraph::new(message).alignment(Alignment::Center);
+    let paragraph = Paragraph::new(message)
+        .alignment(Alignment::Center)
+        .style(Style::new().fg(p.text).bg(p.base));
     frame.render_widget(paragraph, chunks[1]);
 }
 
@@ -170,14 +186,24 @@ fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
     };
     let cap_gib = (view.slice_cap_bytes as f64 / GIB).round() as u64;
     let label = format!("{:.1} / {} GiB", total as f64 / GIB, cap_gib);
+    let p = view.palette;
     let gauge = Gauge::default()
         .ratio(ratio)
         .label(label)
-        .gauge_style(Style::new().fg(Color::Cyan));
+        .style(Style::new().bg(p.base))
+        .gauge_style(Style::new().fg(p.gauge).bg(p.base));
     frame.render_widget(gauge, area);
 }
 
 pub fn render(frame: &mut Frame, view: &View) {
+    let p = view.palette;
+    // Paint the whole frame with the Catppuccin base so any cell not covered by
+    // a widget (gaps, padding) carries the theme background, not the terminal's.
+    frame.render_widget(
+        Block::new().style(Style::new().bg(p.base).fg(p.text)),
+        frame.area(),
+    );
+
     let has_banner = view.status.is_some();
     let mut constraints = vec![Constraint::Length(1)];
     if has_banner {
@@ -190,20 +216,23 @@ pub fn render(frame: &mut Frame, view: &View) {
     let mut idx = 0;
     let title_area = chunks[idx];
     idx += 1;
-    frame.render_widget(Paragraph::new("pitwall"), title_area);
+    frame.render_widget(
+        Paragraph::new("pitwall").style(Style::new().fg(p.accent).bg(p.base).bold()),
+        title_area,
+    );
 
     if has_banner {
         let banner_area = chunks[idx];
         idx += 1;
         let banner = Paragraph::new(view.status.clone().unwrap_or_default())
-            .style(Style::new().fg(Color::Red).bold());
+            .style(Style::new().fg(p.error).bg(p.base).bold());
         frame.render_widget(banner, banner_area);
     }
 
     let body_area = chunks[idx];
     idx += 1;
     if view.rows.is_empty() {
-        render_empty_state(frame, body_area);
+        render_empty_state(frame, body_area, p);
     } else {
         render_table(frame, body_area, view);
     }
@@ -216,9 +245,22 @@ pub fn render(frame: &mut Frame, view: &View) {
 mod tests {
     use super::*;
     use crate::model::{Load, RunnerRow};
+    use crate::theme::Flavor;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::time::SystemTime;
+
+    #[test]
+    fn idle_dims_on_dark_but_not_on_light() {
+        let dark = Palette::for_flavor(Flavor::Mocha);
+        let light = Palette::for_flavor(Flavor::Latte);
+        assert!(load_style(Load::Idle, &dark)
+            .add_modifier
+            .contains(Modifier::DIM));
+        assert!(!load_style(Load::Idle, &light)
+            .add_modifier
+            .contains(Modifier::DIM));
+    }
 
     #[test]
     fn spark_maps_levels_and_pads() {
@@ -275,6 +317,7 @@ mod tests {
         ];
         // 140 wide: the two 20-wide spark columns plus the flexible job/branch
         // columns need the extra room to keep every column visible for the asserts.
+        let palette = Palette::for_flavor(Flavor::Mocha);
         let mut term = Terminal::new(TestBackend::new(140, 12)).unwrap();
         term.draw(|f| {
             render(
@@ -284,6 +327,7 @@ mod tests {
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
                     now: SystemTime::now(),
                     status: None,
+                    palette: &palette,
                 },
             );
         })
@@ -303,7 +347,42 @@ mod tests {
     }
 
     #[test]
+    fn paints_full_catppuccin_background_for_every_flavor() {
+        // Renders each flavor and asserts every cell carries that flavor's base
+        // background — guards the full-bg fill across all four palettes (a live
+        // TTY run isn't available in tests).
+        for flavor in [
+            Flavor::Mocha,
+            Flavor::Macchiato,
+            Flavor::Frappe,
+            Flavor::Latte,
+        ] {
+            let palette = Palette::for_flavor(flavor);
+            let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            term.draw(|f| {
+                render(
+                    f,
+                    &View {
+                        rows: &[],
+                        slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                        now: SystemTime::now(),
+                        status: None,
+                        palette: &palette,
+                    },
+                );
+            })
+            .unwrap();
+            let buf = term.backend().buffer();
+            assert!(
+                buf.content().iter().all(|c| c.bg == palette.base),
+                "all cells should have the {flavor:?} base background"
+            );
+        }
+    }
+
+    #[test]
     fn empty_rows_with_status_shows_banner_not_blank() {
+        let palette = Palette::for_flavor(Flavor::Mocha);
         let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
         term.draw(|f| {
             render(
@@ -313,6 +392,7 @@ mod tests {
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
                     now: SystemTime::now(),
                     status: Some("docker: unreachable".into()),
+                    palette: &palette,
                 },
             );
         })
