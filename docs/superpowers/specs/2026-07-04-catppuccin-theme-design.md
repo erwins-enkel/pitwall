@@ -6,6 +6,22 @@ Replace pitwall's hardcoded ANSI colors with the Catppuccin palette, selectable
 across all four official flavors via an env var, and paint a full Catppuccin
 background so the TUI looks consistent on any terminal.
 
+## Decision provenance
+
+The task prompt was "can we add the catppuccin theme?". The specifics below were
+settled by explicit clarifying questions answered by the user during the
+brainstorming session (verbatim question → chosen answer):
+
+- *"How should Catppuccin flavor be chosen?"* → **All 4, env-selectable**
+- *"How should colors be applied?"* → **Semantic palette module**
+- *"Should the theme paint a full background (Catppuccin base), or just recolor
+  foreground elements over the terminal's own background?"* → **Full base background**
+- *"For an unknown/invalid `PITWALL_THEME` value, what should happen?"* → **Fall back
+  to Mocha**
+
+The full-background choice was therefore an explicit, deliberate user decision, made
+with the terminal-transparency tradeoff stated in the question itself.
+
 ## Decisions
 
 - **Flavors:** all four — Mocha (default), Macchiato, Frappé, Latte — chosen via
