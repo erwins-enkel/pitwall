@@ -13,6 +13,7 @@ pub struct RunnerResource {
 pub struct JobInfo {
     pub workflow: String,
     pub job: String,
+    pub branch: String,
     pub started_at: SystemTime,
 }
 
@@ -111,6 +112,7 @@ mod tests {
             JobInfo {
                 workflow: "ci".into(),
                 job: "test".into(),
+                branch: "main".into(),
                 started_at: now - Duration::from_secs(30),
             },
         );

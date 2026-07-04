@@ -10,7 +10,9 @@ pub struct JobsUpdate {
     pub error: Option<String>,
 }
 
-pub fn parse_runs(json: &str) -> Vec<(u64, String)> {
+/// Extracts `(run id, workflow name, head branch)` per in-progress run. The
+/// branch is the ref the run was started for; missing/empty is carried as "".
+pub fn parse_runs(json: &str) -> Vec<(u64, String, String)> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| v.get("workflow_runs").and_then(|r| r.as_array()).cloned())
@@ -23,7 +25,12 @@ pub fn parse_runs(json: &str) -> Vec<(u64, String)> {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some((id, name))
+            let branch = r
+                .get("head_branch")
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some((id, name, branch))
         })
         .collect()
 }
@@ -41,7 +48,7 @@ fn runner_index_strict(runner_name: &str) -> Option<u32> {
     n.parse().ok()
 }
 
-pub fn parse_jobs(workflow: &str, json: &str) -> Vec<(u32, JobInfo)> {
+pub fn parse_jobs(workflow: &str, branch: &str, json: &str) -> Vec<(u32, JobInfo)> {
     let v: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
         Err(_) => return vec![],
@@ -65,6 +72,7 @@ pub fn parse_jobs(workflow: &str, json: &str) -> Vec<(u32, JobInfo)> {
                         JobInfo {
                             workflow: workflow.to_string(),
                             job,
+                            branch: branch.to_string(),
                             started_at: started,
                         },
                     ))
@@ -88,9 +96,9 @@ async fn gh_api(path: &str) -> anyhow::Result<String> {
 async fn poll(repo: &str) -> anyhow::Result<HashMap<u32, JobInfo>> {
     let runs_json = gh_api(&format!("repos/{repo}/actions/runs?status=in_progress")).await?;
     let mut map = HashMap::new();
-    for (id, name) in parse_runs(&runs_json) {
+    for (id, name, branch) in parse_runs(&runs_json) {
         let jobs_json = gh_api(&format!("repos/{repo}/actions/runs/{id}/jobs")).await?;
-        for (idx, ji) in parse_jobs(&name, &jobs_json) {
+        for (idx, ji) in parse_jobs(&name, &branch, &jobs_json) {
             map.insert(idx, ji);
         }
     }
@@ -116,19 +124,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_runs_extracts_id_and_name() {
+    fn parse_runs_extracts_id_name_and_branch() {
         let runs = parse_runs(include_str!("../tests/fixtures/runs.json"));
-        assert_eq!(runs, vec![(123u64, "Test".to_string())]);
+        assert_eq!(runs, vec![(123u64, "Test".to_string(), "main".to_string())]);
     }
 
     #[test]
     fn parse_jobs_keeps_only_in_progress_self_hosted() {
-        let out = parse_jobs("Test", include_str!("../tests/fixtures/jobs.json"));
+        let out = parse_jobs("Test", "main", include_str!("../tests/fixtures/jobs.json"));
         // Only the in_progress runner-4 job survives; hosted + completed excluded.
         assert_eq!(out.len(), 1);
         let (idx, ji) = &out[0];
         assert_eq!(*idx, 4);
         assert_eq!(ji.workflow, "Test");
         assert_eq!(ji.job, "E2E Tests");
+        assert_eq!(ji.branch, "main");
     }
 }
