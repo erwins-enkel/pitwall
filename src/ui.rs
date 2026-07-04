@@ -106,9 +106,15 @@ fn table_row(row: &RunnerRow, now: SystemTime, p: &Palette) -> Row<'static> {
     // Warn memory pressure is signalled on the mem cell alone (warn color),
     // overriding the row's job-state color for that one cell so a busy runner
     // stays green. Critical is handled by the whole-row NearCap style. The base
-    // background is kept so the cell matches the themed row.
+    // background is kept so the cell matches the themed row, and DIM is cleared so
+    // an idle (dimmed) runner's warn cell still shows full warn color.
     let mem_cell = if row.mem_level == MemLevel::Warn {
-        Cell::from(mem).style(Style::new().fg(p.warn).bg(p.base))
+        Cell::from(mem).style(
+            Style::new()
+                .fg(p.warn)
+                .bg(p.base)
+                .remove_modifier(Modifier::DIM),
+        )
     } else {
         Cell::from(mem)
     };
@@ -356,6 +362,15 @@ mod tests {
             .any(|c| c.fg == color)
     }
 
+    /// True if any cell painted `color` still carries the DIM modifier.
+    fn any_fg_is_dim(term: &Terminal<TestBackend>, color: Color) -> bool {
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|c| c.fg == color && c.modifier.contains(Modifier::DIM))
+    }
+
     #[test]
     fn idle_dims_on_dark_but_not_on_light() {
         let dark = Palette::for_flavor(Flavor::Mocha);
@@ -507,6 +522,24 @@ mod tests {
         assert!(
             has_fg(&term, m.warn),
             "warn mem cell should use the warn color"
+        );
+    }
+
+    #[test]
+    fn warn_mem_cell_is_not_dimmed_on_an_idle_row() {
+        // An idle runner (no job) can still sit in the warn band. Idle rows carry
+        // the DIM modifier; the warn mem cell must clear it so it shows full warn
+        // color rather than a dimmed yellow.
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let rows = vec![row((CAP as f64 * 0.87) as u64, Load::Idle, MemLevel::Warn)];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        assert!(
+            has_fg(&term, m.warn),
+            "warn mem cell should use the warn color"
+        );
+        assert!(
+            !any_fg_is_dim(&term, m.warn),
+            "warn mem cell must not carry the row's DIM modifier"
         );
     }
 
