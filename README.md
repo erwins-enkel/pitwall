@@ -29,7 +29,7 @@ Native runners are discovered automatically at startup by enumerating `actions.r
 - **Org-scoped** runners (e.g. `ltdovr`) can only ever show **busy/idle with no `workflow › job` detail** — GitHub exposes no cheap per-runner job endpoint at org scope. This is by design, not a bug, and holds even after granting `admin:org`.
 - Org busy status uses `orgs/{org}/actions/runners`, which needs the `admin:org` gh scope. Without it the call 403s and the org runner simply shows idle — no error banner. Grant it with `gh auth refresh -h github.com -s admin:org` if you want org busy status.
 - If pitwall runs as a different user than owns a runner install and can't read its `.runner`, that runner still appears with live CPU/mem but always renders idle (no job matching).
-- A native runner whose unit stops (its cgroup disappears) simply drops off the table that cycle, like an ephemeral docker container deregistering — not an error. A genuine cgroup read failure (e.g. a permission change) does raise the status banner and keeps the last-known-good rows on screen.
+- A native runner whose unit stops (its cgroup disappears) simply drops off the table that cycle, like an ephemeral docker container deregistering — not an error. A genuine cgroup read failure (e.g. a permission change) drops only that runner's row and names it in the status banner; the other native runners keep showing fresh readings.
 - Off-box or in CI (no systemd / no matching units), native discovery yields nothing and pitwall runs docker-only.
 
 ## Requirements
