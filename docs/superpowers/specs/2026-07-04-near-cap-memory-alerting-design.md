@@ -67,8 +67,18 @@ colors always agree.
 ### `config.rs`
 
 - Add `warn_ratio: f64`, `crit_ratio: f64` to `Config`.
-- Parse `PITWALL_MEM_WARN_PCT` (default `75`) and `PITWALL_MEM_CRIT_PCT`
-  (default `90`) with the clamp/pin rule above.
+- Factor the parse into a **pure helper** that takes the raw env values as
+  arguments (no env access inside):
+
+  ```rust
+  fn resolve_thresholds(warn_raw: Option<&str>, crit_raw: Option<&str>) -> (f64, f64)
+  ```
+
+  It applies defaults `75`/`90`, converts percent→fraction, clamps `0..=100`, and
+  pins `warn = crit` when `warn > crit`. `Config::from_env` reads
+  `PITWALL_MEM_WARN_PCT` / `PITWALL_MEM_CRIT_PCT` and delegates to it. Keeping the
+  logic pure lets it be unit-tested with plain arguments — no process-env
+  mutation, hence no flakiness when config tests run in parallel.
 
 ### `ui.rs`
 
@@ -110,8 +120,10 @@ Follows the existing unit-test patterns.
   band yields `Load::Warn`; **a busy runner (job present) in the warn band yields
   `Load::Warn`, not `Busy`** (precedence); existing idle/busy/near-cap tests still
   pass.
-- `config.rs`: defaults (75/90 → 0.75/0.90); clamp out-of-range; `warn > crit`
-  pins `warn = crit`.
+- `config.rs`: test the pure `resolve_thresholds` helper directly with plain
+  arguments (no `set_var`/`remove_var`) — defaults (`None`/`None` → 0.75/0.90);
+  clamp both ends (>100, and non-numeric → default); `warn > crit` pins
+  `warn = crit`; degenerate `crit = 0` → `(0.0, 0.0)`.
 - `ui.rs`: via `TestBackend` — **marker text**: a slice ratio in the warn band
   renders ` \u{26a0} warn`, critical renders ` \u{26a0} NEAR CAP`, normal renders
   neither. **Actual color** (the primary deliverable, asserted on buffer cell
