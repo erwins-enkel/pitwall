@@ -408,7 +408,9 @@ fn hosted_row(
         Cell::from(truncate_ellipsis(&wj, job_w)),
         Cell::from(truncate_ellipsis(&j.label, HOSTED_LABEL_W as usize)),
         Cell::from(truncate_ellipsis(&branch, branch_w)),
-        Cell::from(elapsed),
+        // Truncate like the sibling cells so a long wait/elapsed (e.g. `queued
+        // 100h0m` past HOSTED_ELAPSED_W) ellipsizes instead of hard-clipping.
+        Cell::from(truncate_ellipsis(&elapsed, HOSTED_ELAPSED_W as usize)),
     ])
     .style(Style::new().fg(color).bg(p.base))
 }
@@ -1277,6 +1279,53 @@ mod tests {
         assert!(
             content.contains("+2 more"),
             "overflow line should show +2 more"
+        );
+    }
+
+    #[test]
+    fn hosted_long_wait_ellipsizes_instead_of_hard_clipping() {
+        // `queued 100h0m` is 13 cols, over HOSTED_ELAPSED_W (12). On a wide
+        // terminal the only column that can truncate is the fixed elapsed cell,
+        // so an ellipsis there proves it's routed through truncate_ellipsis (not
+        // hard-clipped). 100h = 360000s.
+        let now = SystemTime::now();
+        let hosted = vec![HostedJob {
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-24.04".into(),
+            branch: "main".into(),
+            status: HostedStatus::Queued,
+            since: now - std::time::Duration::from_secs(360_000),
+        }];
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        assert!(
+            content.contains('\u{2026}'),
+            "long elapsed cell should ellipsize"
+        );
+        assert!(
+            !content.contains("100h0m"),
+            "full wait must not render intact past the column width"
         );
     }
 
