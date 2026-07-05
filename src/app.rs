@@ -60,6 +60,9 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
     let (repos, orgs) = resource_native::derive_scopes(&cfg.configured_repos, &natives);
     cfg.repos = repos;
     cfg.orgs = orgs;
+    // Gate the hosted `repo` column: only repo scopes can surface hosted jobs, so
+    // the column is worth showing exactly when more than one repo is polled.
+    let multi_repo = cfg.repos.len() > 1;
 
     let (tx_res, mut rx_res) = mpsc::channel::<ResourceUpdate>(8);
     let (tx_jobs, mut rx_jobs) = mpsc::channel::<JobsUpdate>(8);
@@ -82,6 +85,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
         &prefix,
         warn_ratio,
         crit_ratio,
+        multi_repo,
     )?;
 
     loop {
@@ -112,6 +116,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
             &prefix,
             warn_ratio,
             crit_ratio,
+            multi_repo,
         )?;
     }
 }
@@ -184,6 +189,7 @@ fn draw(
     prefix: &str,
     warn_ratio: f64,
     crit_ratio: f64,
+    multi_repo: bool,
 ) -> anyhow::Result<()> {
     // Banner precedence: docker → native → jobs.
     let status = state
@@ -213,6 +219,7 @@ fn draw(
                 warn_ratio,
                 crit_ratio,
                 hosted: &state.hosted,
+                multi_repo,
             },
         );
     })?;
@@ -424,6 +431,7 @@ mod tests {
     fn jobs_update_sets_hosted() {
         let mut state = AppState::default();
         let hosted = vec![HostedJob {
+            repo: "o/r".into(),
             workflow: "CI".into(),
             job: "Build".into(),
             label: "ubuntu-latest".into(),

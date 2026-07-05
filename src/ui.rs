@@ -40,6 +40,10 @@ pub struct View<'a> {
     /// Hosted (GitHub-hosted) jobs — running + queued — shown in their own
     /// section below the runner table. Empty ⇒ section hidden.
     pub hosted: &'a [HostedJob],
+    /// True when more than one repo is polled (`cfg.repos.len() > 1`). Gates the
+    /// hosted section's `repo` column: with a single repo it's redundant, so the
+    /// table stays 4-column and unchanged.
+    pub multi_repo: bool,
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -367,20 +371,45 @@ fn render_empty_state(frame: &mut Frame, area: Rect, view: &View) {
 
 const HOSTED_LABEL_W: u16 = 14;
 const HOSTED_ELAPSED_W: u16 = 12;
+/// Floor for the `repo` column so its header never clips.
+const REPO_HEADER_W: usize = 4; // "repo"
 
-/// Column rects for the hosted table: `workflow › job` (flex), `label`,
-/// `branch`, `elapsed` — mirrors `column_layout`'s read-back approach so the
-/// flexing cells are truncated to exactly what ratatui allocates.
-fn hosted_col_layout(area: Rect) -> [Rect; 4] {
-    Layout::horizontal([
-        Constraint::Min(12),
-        Constraint::Length(HOSTED_LABEL_W),
-        Constraint::Min(8),
-        Constraint::Length(HOSTED_ELAPSED_W),
-    ])
-    .flex(Flex::Start)
-    .spacing(COL_SPACING)
-    .areas(area)
+/// Width for the hosted `repo` column: the widest `owner/repo` among the shown
+/// jobs (first `HOSTED_CAP`), floored at the `repo` header width. Content-derived,
+/// mirroring [`runner_col_width`]; the `Length` this feeds is still shrunk by
+/// ratatui's solver under space pressure, and the rendered width is read back
+/// from `hosted_col_layout` to drive front-truncation.
+fn repo_col_width(hosted: &[HostedJob]) -> u16 {
+    hosted
+        .iter()
+        .take(HOSTED_CAP)
+        .map(|h| UnicodeWidthStr::width(h.repo.as_str()))
+        .fold(REPO_HEADER_W, usize::max) as u16
+}
+
+/// Column constraints for the hosted table: `workflow › job` (flex), an optional
+/// `repo` (`Some(w)` when multiple repos are polled), `label`, `branch` (flex),
+/// `elapsed`. One array feeds both the rendered `Table` and `hosted_col_layout`
+/// so read-back widths can't diverge from what ratatui allocates.
+fn hosted_constraints(repo_w: Option<u16>) -> Vec<Constraint> {
+    let mut c = vec![Constraint::Min(12)];
+    if let Some(w) = repo_w {
+        c.push(Constraint::Length(w));
+    }
+    c.push(Constraint::Length(HOSTED_LABEL_W));
+    c.push(Constraint::Min(8));
+    c.push(Constraint::Length(HOSTED_ELAPSED_W));
+    c
+}
+
+/// Per-column rects for the hosted table, mirroring `column_layout`'s read-back
+/// approach so the flexing/truncated cells match exactly what ratatui allocates.
+fn hosted_col_layout(area: Rect, repo_w: Option<u16>) -> Vec<Rect> {
+    Layout::horizontal(hosted_constraints(repo_w))
+        .flex(Flex::Start)
+        .spacing(COL_SPACING)
+        .split(area)
+        .to_vec()
 }
 
 fn hosted_row(
@@ -389,6 +418,7 @@ fn hosted_row(
     p: &Palette,
     job_w: usize,
     branch_w: usize,
+    repo_w: Option<usize>,
 ) -> Row<'static> {
     let (glyph, color) = match j.status {
         HostedStatus::InProgress => ('\u{25cf}', p.busy), // ●
@@ -404,30 +434,49 @@ fn hosted_row(
         HostedStatus::InProgress => fmt_elapsed(elapsed_secs(j.since, now)),
         HostedStatus::Queued => format!("queued {}", fmt_wait(elapsed_secs(j.since, now))),
     };
-    Row::new(vec![
-        Cell::from(truncate_ellipsis(&wj, job_w)),
-        Cell::from(truncate_ellipsis(&j.label, HOSTED_LABEL_W as usize)),
-        Cell::from(truncate_ellipsis(&branch, branch_w)),
-        // Truncate like the sibling cells so a long wait/elapsed (e.g. `queued
-        // 100h0m` past HOSTED_ELAPSED_W) ellipsizes instead of hard-clipping.
-        Cell::from(truncate_ellipsis(&elapsed, HOSTED_ELAPSED_W as usize)),
-    ])
-    .style(Style::new().fg(color).bg(p.base))
+    let mut cells = vec![Cell::from(truncate_ellipsis(&wj, job_w))];
+    if let Some(w) = repo_w {
+        // Front-truncate so the repo name (usual identity across same-owner
+        // repos) survives a squeeze, mirroring the runner cell.
+        cells.push(Cell::from(truncate_ellipsis_front(&j.repo, w)));
+    }
+    cells.push(Cell::from(truncate_ellipsis(
+        &j.label,
+        HOSTED_LABEL_W as usize,
+    )));
+    cells.push(Cell::from(truncate_ellipsis(&branch, branch_w)));
+    // Truncate like the sibling cells so a long wait/elapsed (e.g. `queued
+    // 100h0m` past HOSTED_ELAPSED_W) ellipsizes instead of hard-clipping.
+    cells.push(Cell::from(truncate_ellipsis(
+        &elapsed,
+        HOSTED_ELAPSED_W as usize,
+    )));
+    Row::new(cells).style(Style::new().fg(color).bg(p.base))
 }
 
 fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
     let p = view.palette;
-    let header = Row::new(vec!["hosted", "label", "branch", "elapsed"])
-        .style(Style::new().fg(p.text).bg(p.base).bold());
-    let cols = hosted_col_layout(area);
+    // `repo` column only when polling more than one repo; then it slots between
+    // `workflow › job` and `label`, shifting `branch` one rect to the right.
+    let repo_w = view.multi_repo.then(|| repo_col_width(view.hosted));
+    let header_cells = if view.multi_repo {
+        vec!["hosted", "repo", "label", "branch", "elapsed"]
+    } else {
+        vec!["hosted", "label", "branch", "elapsed"]
+    };
+    let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
+    let cols = hosted_col_layout(area, repo_w);
     let job_w = cols[0].width as usize;
-    let branch_w = cols[2].width as usize;
+    // Position-independent so the index shift from the optional repo column can't
+    // desync it: branch is always the second-to-last rect.
+    let branch_w = cols[cols.len() - 2].width as usize;
+    let repo_cell_w = repo_w.map(|_| cols[1].width as usize);
 
     let n = view.hosted.len();
     let shown = n.min(HOSTED_CAP);
     let mut rows: Vec<Row> = view.hosted[..shown]
         .iter()
-        .map(|j| hosted_row(j, view.now, p, job_w, branch_w))
+        .map(|j| hosted_row(j, view.now, p, job_w, branch_w, repo_cell_w))
         .collect();
     if n > HOSTED_CAP {
         rows.push(
@@ -435,18 +484,10 @@ fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
                 .style(Style::new().fg(p.idle).bg(p.base)),
         );
     }
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Min(12),
-            Constraint::Length(HOSTED_LABEL_W),
-            Constraint::Min(8),
-            Constraint::Length(HOSTED_ELAPSED_W),
-        ],
-    )
-    .header(header)
-    .column_spacing(COL_SPACING)
-    .style(Style::new().fg(p.text).bg(p.base));
+    let table = Table::new(rows, hosted_constraints(repo_w))
+        .header(header)
+        .column_spacing(COL_SPACING)
+        .style(Style::new().fg(p.text).bg(p.base));
     frame.render_widget(table, area);
 }
 
@@ -583,6 +624,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })
@@ -789,6 +831,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })
@@ -941,6 +984,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })
@@ -1002,6 +1046,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })
@@ -1046,6 +1091,7 @@ mod tests {
                         warn_ratio: 0.85,
                         crit_ratio: 0.90,
                         hosted: &[],
+                        multi_repo: false,
                     },
                 );
             })
@@ -1077,6 +1123,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })
@@ -1191,6 +1238,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })
@@ -1229,6 +1277,7 @@ mod tests {
         // and the trailing 2 collapse into the "+2 more" overflow line.
         let now = SystemTime::now();
         let mut hosted = vec![HostedJob {
+            repo: "o/r".into(),
             workflow: "CI".into(),
             job: "Lint".into(),
             label: "ubuntu-24.04".into(),
@@ -1238,6 +1287,7 @@ mod tests {
         }];
         for i in 0..7 {
             hosted.push(HostedJob {
+                repo: "o/r".into(),
                 workflow: "CI".into(),
                 job: format!("Build-{i}"),
                 label: "ubuntu-latest".into(),
@@ -1265,6 +1315,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &hosted,
+                    multi_repo: false,
                 },
             );
         })
@@ -1290,6 +1341,7 @@ mod tests {
         // hard-clipped). 100h = 360000s.
         let now = SystemTime::now();
         let hosted = vec![HostedJob {
+            repo: "o/r".into(),
             workflow: "CI".into(),
             job: "Lint".into(),
             label: "ubuntu-24.04".into(),
@@ -1314,6 +1366,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &hosted,
+                    multi_repo: false,
                 },
             );
         })
@@ -1327,6 +1380,70 @@ mod tests {
             !content.contains("100h0m"),
             "full wait must not render intact past the column width"
         );
+    }
+
+    #[test]
+    fn hosted_repo_column_shown_only_when_multi_repo() {
+        // With >1 repo polled the `repo` column disambiguates hosted jobs; with a
+        // single repo it's redundant and the owner/repo strings never render.
+        let now = SystemTime::now();
+        let hosted = vec![
+            HostedJob {
+                repo: "erwins-enkel/pulse".into(),
+                workflow: "CI".into(),
+                job: "Build".into(),
+                label: "ubuntu-latest".into(),
+                branch: "main".into(),
+                status: HostedStatus::InProgress,
+                since: now - std::time::Duration::from_secs(30),
+            },
+            HostedJob {
+                repo: "scoop/vanscout".into(),
+                workflow: "CI".into(),
+                job: "Verify".into(),
+                label: "ubuntu-latest".into(),
+                branch: "main".into(),
+                status: HostedStatus::InProgress,
+                since: now - std::time::Duration::from_secs(20),
+            },
+        ];
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let render_with = |multi_repo: bool| -> String {
+            let mut term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+            term.draw(|f| {
+                render(
+                    f,
+                    &View {
+                        rows: &[],
+                        slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                        now,
+                        status: None,
+                        palette: &palette,
+                        prefix: "ci-runner-",
+                        matched_seen: 0,
+                        unmatched_seen: 0,
+                        warn_ratio: 0.85,
+                        crit_ratio: 0.90,
+                        hosted: &hosted,
+                        multi_repo,
+                    },
+                );
+            })
+            .unwrap();
+            text(&term)
+        };
+
+        // Multi-repo: `repo` header + both owner/repo values render in full (the
+        // 140-col width leaves the content-sized column untruncated).
+        let multi = render_with(true);
+        assert!(multi.contains("repo"), "repo header should render");
+        assert!(multi.contains("erwins-enkel/pulse"));
+        assert!(multi.contains("scoop/vanscout"));
+
+        // Single-repo: no repo column — the owner/repo strings never appear.
+        let single = render_with(false);
+        assert!(!single.contains("erwins-enkel/pulse"));
+        assert!(!single.contains("scoop/vanscout"));
     }
 
     #[test]
@@ -1350,6 +1467,7 @@ mod tests {
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
                     hosted: &[],
+                    multi_repo: false,
                 },
             );
         })

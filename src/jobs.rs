@@ -107,7 +107,7 @@ fn is_self_hosted(labels: &serde_json::Value) -> bool {
 /// `labels`, which just echo the workflow's `runs-on` request: a self-hosted
 /// workflow whose `runs-on` is a bare custom label (no `self-hosted` in the
 /// list) would also surface here as "hosted".
-pub fn parse_hosted_jobs(workflow: &str, branch: &str, json: &str) -> Vec<HostedJob> {
+pub fn parse_hosted_jobs(repo: &str, workflow: &str, branch: &str, json: &str) -> Vec<HostedJob> {
     let v: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
         Err(_) => return vec![],
@@ -143,6 +143,7 @@ pub fn parse_hosted_jobs(workflow: &str, branch: &str, json: &str) -> Vec<Hosted
                         .map(parse_rfc3339)
                         .unwrap_or_else(SystemTime::now);
                     Some(HostedJob {
+                        repo: repo.to_string(),
                         workflow: workflow.to_string(),
                         job,
                         label,
@@ -243,7 +244,7 @@ async fn poll_repo(repo: &str) -> anyhow::Result<ScopeState> {
                 );
             }
             st.hosted
-                .extend(parse_hosted_jobs(&name, &branch, &jobs_json));
+                .extend(parse_hosted_jobs(repo, &name, &branch, &jobs_json));
         }
     }
     Ok(st)
@@ -496,6 +497,7 @@ mod tests {
         ScopeState {
             slice: Slice::new(),
             hosted: vec![HostedJob {
+                repo: "o/r".into(),
                 workflow: "w".into(),
                 job: job.into(),
                 label: "ubuntu-latest".into(),
@@ -522,6 +524,7 @@ mod tests {
     #[test]
     fn parse_hosted_jobs_keeps_hosted_running_and_queued_only() {
         let out = parse_hosted_jobs(
+            "o/r",
             "CI",
             "main",
             include_str!("../tests/fixtures/hosted_jobs.json"),
@@ -530,6 +533,7 @@ mod tests {
         assert_eq!(out.len(), 2);
 
         let build = out.iter().find(|h| h.job == "Build").unwrap();
+        assert_eq!(build.repo, "o/r");
         assert_eq!(build.workflow, "CI");
         assert_eq!(build.branch, "main");
         assert_eq!(build.label, "ubuntu-latest");

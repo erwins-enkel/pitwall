@@ -69,6 +69,9 @@ fn main() {
                 warn_ratio: WARN,
                 crit_ratio: CRIT,
                 hosted: &hosted,
+                // Single-repo demo: the hosted `repo` column stays hidden, so the
+                // committed screenshot is unchanged.
+                multi_repo: false,
             },
         );
     })
@@ -147,6 +150,7 @@ fn demo_hosted(now: SystemTime) -> Vec<HostedJob> {
     let ago = |s: u64| now - Duration::from_secs(s);
     vec![
         HostedJob {
+            repo: "erwins-enkel/pulse".into(),
             workflow: "Deploy".into(),
             job: "build".into(),
             label: "ubuntu-latest".into(),
@@ -155,6 +159,7 @@ fn demo_hosted(now: SystemTime) -> Vec<HostedJob> {
             since: ago(72),
         },
         HostedJob {
+            repo: "erwins-enkel/pulse".into(),
             workflow: "E2E".into(),
             job: "chromium".into(),
             label: "ubuntu-24.04".into(),
@@ -163,6 +168,7 @@ fn demo_hosted(now: SystemTime) -> Vec<HostedJob> {
             since: ago(44),
         },
         HostedJob {
+            repo: "erwins-enkel/pulse".into(),
             workflow: "Release".into(),
             job: "publish".into(),
             label: "ubuntu-latest".into(),

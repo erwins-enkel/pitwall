@@ -52,6 +52,9 @@ pub enum HostedStatus {
 /// wait time respectively.
 #[derive(Debug, Clone)]
 pub struct HostedJob {
+    /// The `owner/repo` this hosted job runs in. Shown in the hosted section only
+    /// when more than one repo is polled, to disambiguate across repos.
+    pub repo: String,
     pub workflow: String,
     pub job: String,
     pub label: String,
@@ -514,6 +517,7 @@ mod tests {
         let now = SystemTime::now();
         fn j(job: &str, status: HostedStatus, ago: u64, now: SystemTime) -> HostedJob {
             HostedJob {
+                repo: "o/r".into(),
                 workflow: "w".into(),
                 job: job.into(),
                 label: "ubuntu-latest".into(),
