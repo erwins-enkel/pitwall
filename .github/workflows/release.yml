@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build binaries for, e.g. v0.2.0"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    # Only the push-to-main path maintains the release PR / cuts releases.
+    # A workflow_dispatch is a build-only re-run and must skip this job.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4, 2026-07-05
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    needs: release-please
+    # The !cancelled() wrapper is required: without it, the skipped release-please
+    # need (on workflow_dispatch) would skip this job and kill the manual re-run path.
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    runs-on: ubuntu-24.04
+    env:
+      # On the push:main trigger github.ref is the branch, not the tag — resolve the
+      # tag explicitly so checkout builds the bumped-version commit and the upload
+      # action targets the right Release.
+      TAG_REF: refs/tags/${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4, 2026-07-05
+        with:
+          ref: ${{ env.TAG_REF }}
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, 2026-07-05
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1, 2026-07-05
+        with:
+          bin: pitwall
+          target: ${{ matrix.target }}
+          archive: pitwall-$target
+          checksum: sha256
+          ref: ${{ env.TAG_REF }}
+          token: ${{ secrets.GITHUB_TOKEN }}
