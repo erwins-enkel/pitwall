@@ -36,6 +36,22 @@ Native runners are discovered automatically at startup by enumerating `actions.r
 - A native runner whose unit stops (its cgroup disappears) simply drops off the table that cycle, like an ephemeral docker container deregistering — not an error. A genuine cgroup read failure (e.g. a permission change) drops only that runner's row and names it in the status banner; the other native runners keep showing fresh readings.
 - Off-box or in CI (no systemd / no matching units), native discovery yields nothing and pitwall runs docker-only.
 
+## Hosted jobs
+
+Below the runner table, pitwall lists **GitHub-hosted** jobs for the configured
+repos — both running and queued. Hosted runners are ephemeral per-job VMs on
+GitHub's infrastructure, so there is **no CPU/mem to show**: this section carries
+only `workflow › job`, the requested runner label (`ubuntu-latest`, …), branch,
+and elapsed (running) or wait time (`queued 8s`, from the job's creation).
+
+- `●` a running hosted job; `○` a queued one (waiting for a hosted runner).
+- Sourced from **repo** scopes only — the per-job endpoint is repo-scoped, so
+  org-scoped entries contribute nothing here (same limitation as org busy status).
+- A job is treated as self-hosted (and shown in the table above instead) when its
+  `labels` include `self-hosted`; everything else is hosted.
+- The section is hidden when there are no hosted jobs, and caps at a handful of
+  rows with a `+N more` line so a large matrix can't crowd out the runner table.
+
 ## Requirements
 
 - Linux with cgroup v2 (native runners read `/sys/fs/cgroup`) and `systemctl` (for native runner discovery — optional; absent = docker-only)
