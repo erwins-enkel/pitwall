@@ -13,7 +13,7 @@ pub struct Config {
     pub flavor: Flavor,
     pub warn_ratio: f64,
     pub crit_ratio: f64,
-    /// Repos to poll for in-progress job detail. Defaults to `[repo]`; `app`
+    /// Repos to poll for in-progress job detail. Defaults to `configured_repos`; `app`
     /// augments this with native runners' repo-scopes (deduplicated) at startup.
     pub repos: Vec<String>,
     /// Orgs to poll for runner busy status (native org-scoped runners). Empty by
