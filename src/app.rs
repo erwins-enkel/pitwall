@@ -182,8 +182,9 @@ fn apply_jobs_update(state: &mut AppState, update: JobsUpdate) {
     state.hosted = update.hosted;
 }
 
-/// Applies a Vercel poll result. Sorting + last-known-good policy live in
-/// `vercel::run` (it clears to empty on error), so here we simply replace.
+/// Applies a Vercel poll result. Sorting + the clear-on-error policy (an error
+/// yields an empty list, unlike jobs' last-known-good) live in `vercel::run`, so
+/// here we simply replace.
 fn apply_vercel_update(state: &mut AppState, update: VercelUpdate) {
     state.deployments = update.deployments;
 }
