@@ -2,8 +2,8 @@ use crate::model::RunnerResource;
 use std::collections::HashMap;
 
 /// Number of samples retained per runner series. At the 2s resource poll
-/// cadence this is ~40s of history.
-pub const WINDOW: usize = 20;
+/// cadence this is ~80s of history.
+pub const WINDOW: usize = 40;
 
 #[derive(Default)]
 struct RunnerSeries {
@@ -29,7 +29,7 @@ impl History {
     /// Appends one sample per runner in `sample`, then prunes series for runners
     /// absent from `retain`. Splitting the two lets one source (docker/native)
     /// append only its own runners at its own 2s cadence — one sample per 2s, so
-    /// the window stays ~40s — while pruning against the union of both sources so
+    /// the window stays ~80s — while pruning against the union of both sources so
     /// the other source's series are never wrongly dropped. Guards a zero
     /// `mem_limit` (uncapped native runners) to avoid divide-by-zero. Pass the
     /// same slice for both to record a full snapshot.

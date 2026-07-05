@@ -3,7 +3,8 @@ use crate::model::{
 };
 use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
 use ratatui::Frame;
 use std::time::SystemTime;
@@ -14,12 +15,15 @@ const MIB: f64 = KIB * 1024.0;
 const GIB: f64 = MIB * 1024.0;
 
 const SPARK_WIDTH: usize = 20;
-const BLOCKS: [char; 8] = [
-    '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
-];
 /// CPU spark auto-scales to its window max but never below this, so idle jitter
 /// (0.1–0.3%) reads as a flat baseline rather than amplified noise.
 const CPU_SPARK_FLOOR: f64 = 10.0;
+
+/// Braille dot-pattern bits (relative to U+2800) for the left column, indexed by
+/// fill height 0..=4 (bottom-up). See `braille_glyph`.
+const BRAILLE_LEFT: [u32; 5] = [0x00, 0x40, 0x44, 0x46, 0x47];
+/// Same as `BRAILLE_LEFT` for the right column.
+const BRAILLE_RIGHT: [u32; 5] = [0x00, 0x80, 0xA0, 0xB0, 0xB8];
 
 pub struct View<'a> {
     pub rows: &'a [RunnerRow],
@@ -92,25 +96,132 @@ fn fmt_wait(secs: u64) -> String {
     }
 }
 
-/// Renders `values` (oldest→newest) as block-char sparkline glyphs scaled
-/// against `max`, right-aligned within `width` (left-padded with spaces). A
-/// non-positive `max` renders all values at the lowest level.
-fn spark(values: &[f64], max: f64, width: usize) -> String {
-    let start = values.len().saturating_sub(width);
+/// One braille cell (U+28xx) with `hl`/`hr` dots bottom-up-filled in its left
+/// and right columns. Heights are clamped to 0..=4 (0 = no dots in that
+/// column, 4 = the column fully filled).
+fn braille_glyph(hl: usize, hr: usize) -> char {
+    let hl = hl.min(4);
+    let hr = hr.min(4);
+    char::from_u32(0x2800 + BRAILLE_LEFT[hl] + BRAILLE_RIGHT[hr]).unwrap_or(' ')
+}
+
+/// Linear RGB interpolation between `a` and `b`, `t` clamped 0..1. Falls back
+/// to `b` for any non-`Rgb` color so the match stays total even though every
+/// `Palette` color is `Rgb` today.
+fn lerp_color(a: Color, b: Color, t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let mix = |x: u8, y: u8| -> u8 { (x as f64 + (y as f64 - x as f64) * t).round() as u8 };
+            Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+        }
+        _ => b,
+    }
+}
+
+/// Green→yellow→red gradient anchored at `lo`/`hi` (both expressed on `frac`'s
+/// scale): at/below `lo` is `p.busy`, at/above `hi` is `p.near_cap`, and the
+/// band between ramps busy→warn→near_cap. `hi <= lo` is guarded (shouldn't
+/// happen for our callers, but the fn stays total).
+fn gradient(frac: f64, lo: f64, hi: f64, p: &Palette) -> Color {
+    if hi <= lo {
+        return if frac >= hi { p.near_cap } else { p.busy };
+    }
+    if frac <= lo {
+        return p.busy;
+    }
+    if frac >= hi {
+        return p.near_cap;
+    }
+    let u = (frac - lo) / (hi - lo);
+    if u < 0.5 {
+        lerp_color(p.busy, p.warn, u / 0.5)
+    } else {
+        lerp_color(p.warn, p.near_cap, (u - 0.5) / 0.5)
+    }
+}
+
+/// Renders `values` (oldest→newest) as a btop-style braille sparkline: two
+/// samples per cell (left/right dot columns), heights scaled against
+/// `height_max`, right-aligned within `width` cells (2*width sample slots;
+/// shortfall leading slots render as blank cells). A non-positive
+/// `height_max` renders every present sample as a baseline (height-1) dot,
+/// mirroring the old `spark`'s non-positive-max guard.
+///
+/// `idle` rows render as a single flat/dim span (mirroring the pre-existing
+/// idle row look); otherwise each cell is colored individually via
+/// `color_of`, called with the taller/larger of its pair of samples so tall
+/// dots read the right heat.
+fn spark_line(
+    values: &[f64],
+    height_max: f64,
+    width: usize,
+    p: &Palette,
+    idle: bool,
+    color_of: impl Fn(f64) -> Color,
+) -> Line<'static> {
+    let n_slots = 2 * width;
+    let mut slots: Vec<Option<f64>> = vec![None; n_slots];
+    let start = values.len().saturating_sub(n_slots);
     let shown = &values[start..];
-    let mut s = String::with_capacity(width * 3);
-    for _ in 0..width.saturating_sub(shown.len()) {
-        s.push(' ');
+    let offset = n_slots - shown.len();
+    for (i, &v) in shown.iter().enumerate() {
+        slots[offset + i] = Some(v);
     }
-    for &v in shown {
-        let level = if max > 0.0 {
-            ((v / max).clamp(0.0, 1.0) * (BLOCKS.len() - 1) as f64).round() as usize
+
+    let height_of = |v: f64| -> usize {
+        let frac = if height_max > 0.0 {
+            (v / height_max).clamp(0.0, 1.0)
         } else {
-            0
+            0.0
         };
-        s.push(BLOCKS[level]);
+        ((frac * 4.0).round() as usize).max(1)
+    };
+
+    if idle {
+        let mut s = String::with_capacity(width);
+        for i in 0..width {
+            let (l, r) = (slots[2 * i], slots[2 * i + 1]);
+            if l.is_none() && r.is_none() {
+                s.push(' ');
+            } else {
+                let hl = l.map(height_of).unwrap_or(0);
+                let hr = r.map(height_of).unwrap_or(0);
+                s.push(braille_glyph(hl, hr));
+            }
+        }
+        // Mirror load_style: DIM sharpens idle rows on a dark base but washes
+        // them out on a light one, so light flavors (Latte) skip it and rely on
+        // the idle color alone — keeping the sparkline consistent with the rest
+        // of the idle row.
+        let style = Style::new().fg(p.idle).bg(p.base);
+        let style = if p.is_light {
+            style
+        } else {
+            style.add_modifier(Modifier::DIM)
+        };
+        return Line::from(vec![Span::styled(s, style)]);
     }
-    s
+
+    let mut spans = Vec::with_capacity(width);
+    for i in 0..width {
+        let (l, r) = (slots[2 * i], slots[2 * i + 1]);
+        match (l, r) {
+            (None, None) => spans.push(Span::raw(" ")),
+            _ => {
+                let hl = l.map(height_of).unwrap_or(0);
+                let hr = r.map(height_of).unwrap_or(0);
+                let glyph = braille_glyph(hl, hr);
+                let max_v = l.into_iter().chain(r).fold(f64::MIN, f64::max);
+                let color = color_of(max_v);
+                spans.push(Span::styled(
+                    glyph.to_string(),
+                    Style::new().fg(color).bg(p.base),
+                ));
+            }
+        }
+    }
+    Line::from(spans)
 }
 
 fn load_style(load: Load, p: &Palette) -> Style {
@@ -227,14 +338,21 @@ fn truncate_ellipsis_front(s: &str, max: usize) -> String {
     out
 }
 
+/// Builds one runner row's cells. Takes `view` (rather than separate
+/// `now`/`palette`/`warn_ratio`/`crit_ratio` params) to stay under clippy's
+/// too-many-arguments threshold — `render_table` already has it in scope.
 fn table_row(
     row: &RunnerRow,
-    now: SystemTime,
-    p: &Palette,
+    view: &View,
     runner_w: usize,
     job_w: usize,
     branch_w: usize,
 ) -> Row<'static> {
+    let now = view.now;
+    let p = view.palette;
+    let warn_ratio = view.warn_ratio;
+    let crit_ratio = view.crit_ratio;
+    let idle = matches!(row.load, Load::Idle);
     let cpu = format!("{:.1}%", row.cpu_pct);
     // CPU has no per-runner cap in the model, so scale to the window max with a
     // floor. Mem is already a 0..1 fraction of the limit, so scale to 1.0.
@@ -244,14 +362,24 @@ fn table_row(
         .copied()
         .fold(0.0_f64, f64::max)
         .max(CPU_SPARK_FLOOR);
-    let cpu_spark = spark(&row.cpu_hist, cpu_max, SPARK_WIDTH);
+    // CPU color is window-relative (not an absolute /100 scale): cpu_pct is
+    // Docker's per-core convention (100% = one core; multi-core runners read
+    // 400-800%) and no per-runner core quota is available, so an absolute
+    // scale would pin multi-core runners solid red. Window-relative is
+    // intended and btop-faithful.
+    let cpu_spark = spark_line(&row.cpu_hist, cpu_max, SPARK_WIDTH, p, idle, |v| {
+        gradient(v / cpu_max, 0.0, 1.0, p)
+    });
     // Uncapped runners (native cgroups, limit 0) show usage alone, not `X/0.0MiB`.
     let mem = if row.mem_limit == 0 {
         fmt_mem(row.mem_bytes)
     } else {
         format!("{}/{}", fmt_mem(row.mem_bytes), fmt_mem(row.mem_limit))
     };
-    let mem_spark = spark(&row.mem_hist, 1.0, SPARK_WIDTH);
+    // Mem color is threshold-anchored (mem_hist is already a 0..1 fraction).
+    let mem_spark = spark_line(&row.mem_hist, 1.0, SPARK_WIDTH, p, idle, |v| {
+        gradient(v, warn_ratio, crit_ratio, p)
+    });
     // Warn memory pressure is signalled on the mem cell alone (warn color),
     // overriding the row's job-state color for that one cell so a busy runner
     // stays green. Critical is handled by the whole-row NearCap style. The base
@@ -331,7 +459,7 @@ fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     let rows: Vec<Row> = view
         .rows
         .iter()
-        .map(|r| table_row(r, view.now, p, runner_cell_w, job_w, branch_w))
+        .map(|r| table_row(r, view, runner_cell_w, job_w, branch_w))
         .collect();
     let table = Table::new(rows, column_widths(runner_w))
         .header(header)
@@ -671,18 +799,163 @@ mod tests {
     }
 
     #[test]
-    fn spark_maps_levels_and_pads() {
-        // 0 → lowest block, max → highest block.
-        assert_eq!(spark(&[0.0], 100.0, 1), "\u{2581}");
-        assert_eq!(spark(&[100.0], 100.0, 1), "\u{2588}");
-        // Left-padded with spaces to width, newest right-aligned.
-        assert_eq!(spark(&[100.0], 100.0, 3), "  \u{2588}");
-        // Empty input → all spaces.
-        assert_eq!(spark(&[], 1.0, 3), "   ");
-        // Non-positive max → all lowest (no divide/amplify).
-        assert_eq!(spark(&[5.0, 3.0], 0.0, 2), "\u{2581}\u{2581}");
-        // Over-width input keeps the most recent `width` samples.
-        assert_eq!(spark(&[0.0, 100.0], 100.0, 1), "\u{2588}");
+    fn braille_glyph_bottom_up_fills() {
+        assert_eq!(braille_glyph(0, 0), '\u{2800}');
+        assert_eq!(
+            braille_glyph(4, 4),
+            char::from_u32(0x2800 + 0x47 + 0xB8).unwrap()
+        );
+        assert_eq!(braille_glyph(1, 0), char::from_u32(0x2800 + 0x40).unwrap());
+        // Right-dots-only (left column empty) — the boundary-cell shape.
+        assert_eq!(braille_glyph(0, 1), char::from_u32(0x2800 + 0x80).unwrap());
+        // A mid value on both columns.
+        assert_eq!(
+            braille_glyph(2, 3),
+            char::from_u32(0x2800 + 0x44 + 0xB0).unwrap()
+        );
+    }
+
+    #[test]
+    fn gradient_cpu_scale_ramps_busy_warn_near_cap() {
+        let p = Palette::for_flavor(Flavor::Mocha);
+        assert_eq!(gradient(0.0, 0.0, 1.0, &p), p.busy);
+        assert_eq!(gradient(-1.0, 0.0, 1.0, &p), p.busy);
+        assert_eq!(gradient(0.5, 0.0, 1.0, &p), p.warn);
+        assert_eq!(gradient(1.0, 0.0, 1.0, &p), p.near_cap);
+        assert_eq!(gradient(2.0, 0.0, 1.0, &p), p.near_cap);
+    }
+
+    #[test]
+    fn gradient_mem_scale_stays_green_below_warn_band() {
+        let p = Palette::for_flavor(Flavor::Mocha);
+        // The key "not yellow at 50%" assertion: mem sits well under warn_ratio.
+        assert_eq!(gradient(0.5, 0.85, 0.90, &p), p.busy);
+        assert_eq!(gradient(0.875, 0.85, 0.90, &p), p.warn);
+        assert_eq!(gradient(0.90, 0.85, 0.90, &p), p.near_cap);
+        assert_eq!(gradient(0.95, 0.85, 0.90, &p), p.near_cap);
+    }
+
+    #[test]
+    fn lerp_color_endpoints_and_non_rgb_fallback() {
+        let a = Color::Rgb(0, 0, 0);
+        let b = Color::Rgb(255, 100, 50);
+        assert_eq!(lerp_color(a, b, 0.0), a);
+        assert_eq!(lerp_color(a, b, 1.0), b);
+        // Non-Rgb inputs (palette is all Rgb today, but the match must be total).
+        assert_eq!(lerp_color(Color::Reset, Color::Red, 0.5), Color::Red);
+    }
+
+    #[test]
+    fn multi_core_cpu_color_is_window_relative_not_absolute() {
+        // Drives the REAL render path (render -> render_table -> table_row),
+        // not a reimplemented gradient closure, so a regression that swaps the
+        // real call site's window-relative `v / cpu_max` scale for an absolute
+        // `v / 100` scale would actually fail this test.
+        //
+        // cpu_pct is Docker's per-core convention (100% = one core), so a
+        // multi-core runner's history can read 200-400%. Under the intended
+        // window-relative scale (cpu_max = the window's own max, 400 here),
+        // fracs are 0.5..1.0: the ramp passes through `warn` (yellow) before
+        // topping out at `near_cap` (red) — so BOTH colors must appear. Under a
+        // buggy absolute `/100` scale every frac would be >= 2.0 and clamp
+        // straight to `near_cap`, painting the whole sparkline solid red with
+        // NO yellow at all. So `has_fg(term, p.warn)` is the discriminator:
+        // it only passes under the correct, window-relative scale.
+        let p = Palette::for_flavor(Flavor::Mocha);
+        let rows = vec![RunnerRow {
+            name: "ci-runner-1".into(),
+            cpu_pct: 400.0,
+            // Well under the warn band (warn_ratio 0.85 in `draw`) and
+            // `mem_level` explicitly Normal, so the mem cell can't itself
+            // paint `warn` — the only possible source of yellow in this
+            // frame is the CPU sparkline.
+            mem_bytes: 47 * 1024 * 1024,
+            mem_limit: 8 * 1024 * 1024 * 1024,
+            job: Some(crate::model::JobInfo {
+                workflow: "CI".into(),
+                job: "test".into(),
+                branch: "main".into(),
+                started_at: SystemTime::now(),
+            }),
+            load: Load::Busy, // busy row's own text/style is green, not yellow/red
+            mem_level: MemLevel::Normal,
+            kind: SourceKind::Docker,
+            cpu_hist: vec![200.0, 250.0, 300.0, 350.0, 400.0], // window max 400
+            mem_hist: vec![],
+        }];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        assert!(
+            has_fg(&term, p.warn),
+            "window-relative CPU scale must ramp through warn (yellow) before near_cap"
+        );
+        assert!(
+            has_fg(&term, p.near_cap),
+            "the window's peak sample must still reach near_cap (red)"
+        );
+    }
+
+    /// Renders a plain (non-gradient) spark_line for right-alignment /
+    /// space-vs-glyph assertions; the color is irrelevant to those checks.
+    fn plain_spark(values: &[f64], width: usize, p: &Palette) -> Line<'static> {
+        spark_line(values, 100.0, width, p, false, |_| p.busy)
+    }
+
+    #[test]
+    fn sub_cell_right_alignment_pins_newest_sample_to_the_right_edge() {
+        let p = Palette::for_flavor(Flavor::Mocha);
+
+        // width=2 → 4 slots. 1 sample: 3 leading empty slots + the boundary
+        // cell (None, Some) pinned at the far right.
+        let one = plain_spark(&[100.0], 2, &p);
+        assert_eq!(one.spans.len(), 2);
+        assert_eq!(one.spans[0].content.as_ref(), " "); // fully-empty leading cell
+        assert_eq!(
+            one.spans[1].content.chars().next().unwrap(),
+            braille_glyph(0, 4)
+        );
+
+        // 2 samples: exactly fill the last cell, first cell now fully empty.
+        let two = plain_spark(&[0.0, 100.0], 2, &p);
+        assert_eq!(two.spans[0].content.as_ref(), " ");
+        assert_eq!(
+            two.spans[1].content.chars().next().unwrap(),
+            braille_glyph(1, 4)
+        );
+
+        // 3 samples: the newest still lands on the far-right cell's right dot
+        // column; the boundary cell now holds the previous sample as its left
+        // dot with the third-oldest pinned at the true left cell's right dot.
+        let three = plain_spark(&[50.0, 0.0, 100.0], 2, &p);
+        assert_eq!(three.spans.len(), 2);
+        // Leading cell is a right-dots-only boundary cell (not a space): it
+        // holds only the oldest-of-three sample (50.0) on its right column.
+        assert_ne!(three.spans[0].content.as_ref(), " ");
+        assert_eq!(
+            three.spans[0].content.chars().next().unwrap(),
+            braille_glyph(0, 2)
+        );
+        assert_eq!(
+            three.spans[1].content.chars().next().unwrap(),
+            braille_glyph(1, 4)
+        );
+    }
+
+    #[test]
+    fn idle_spark_line_is_one_flat_idle_span() {
+        // Dark flavor: single flat idle span WITH DIM.
+        let dark = Palette::for_flavor(Flavor::Mocha);
+        let line = spark_line(&[10.0, 20.0, 100.0], 100.0, 5, &dark, true, |_| dark.busy);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style.fg, Some(dark.idle));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+
+        // Light flavor (Latte): same flat idle span but NO DIM, mirroring
+        // load_style so the sparkline stays consistent with the idle row.
+        let light = Palette::for_flavor(Flavor::Latte);
+        let line = spark_line(&[10.0, 20.0, 100.0], 100.0, 5, &light, true, |_| light.busy);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style.fg, Some(light.idle));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

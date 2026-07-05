@@ -86,14 +86,17 @@ fn main() {
 /// colors and gauge banding match the chosen `mem_bytes`.
 fn demo_rows() -> Vec<RunnerRow> {
     vec![
-        // Docker, busy & healthy.
+        // Docker, busy & healthy, multi-core: this container's cgroup spans
+        // several host cores, so cpu_pct sweeps well past 100% (~1.5-6.5
+        // cores busy). Exercises the cpu column's 3-digit-percent width and
+        // the sparkline's gradient scaling above the 100% floor.
         docker_row(
             "ci-runner-1",
-            63.2,
+            412.3,
             34 * GIB / 10, // 3.4 GiB
             Some(("CI", "build", "main", 8 * 60 + 12)),
-            wave(20, 30.0, 88.0, 2.4, 0.0),
-            wave(20, 0.30, 0.46, 1.6, 0.2),
+            wave(40, 150.0, 650.0, 2.4, 0.0),
+            wave(40, 0.30, 0.46, 1.6, 0.2),
         ),
         // Docker, idle (dimmed row, flat baseline sparklines).
         docker_row(
@@ -101,8 +104,8 @@ fn demo_rows() -> Vec<RunnerRow> {
             0.2,
             348 * MIB,
             None,
-            wave(20, 0.1, 0.4, 1.0, 0.0),
-            flat(20, 0.04),
+            wave(40, 0.1, 0.4, 1.0, 0.0),
+            flat(40, 0.04),
         ),
         // Docker, busy in the WARN band: row stays green, mem cell turns yellow.
         docker_row(
@@ -110,8 +113,8 @@ fn demo_rows() -> Vec<RunnerRow> {
             88.5,
             (8.0 * GIB as f64 * 0.87) as u64,
             Some(("Security", "Dependency review", "renovate/deps", 3 * 60 + 5)),
-            wave(20, 55.0, 96.0, 3.1, 0.4),
-            ramp(20, 0.62, 0.87),
+            wave(40, 55.0, 96.0, 3.1, 0.4),
+            ramp(40, 0.62, 0.87),
         ),
         // Docker, NEAR CAP: whole row goes red.
         docker_row(
@@ -119,8 +122,8 @@ fn demo_rows() -> Vec<RunnerRow> {
             74.1,
             (8.0 * GIB as f64 * 0.953) as u64,
             Some(("Release", "publish crate", "v1.4.0", 12 * 60 + 40)),
-            wave(20, 40.0, 80.0, 2.0, 0.7),
-            ramp(20, 0.80, 0.95),
+            wave(40, 40.0, 80.0, 2.0, 0.7),
+            ramp(40, 0.80, 0.95),
         ),
         // Native (non-docker) runner, busy. No cgroup limit → mem shows usage
         // alone; mem sparkline is flat (nothing to scale against).
@@ -129,8 +132,8 @@ fn demo_rows() -> Vec<RunnerRow> {
             21.0,
             512 * MIB,
             Some(("Deploy", "migrate db", "main", 90)),
-            wave(20, 8.0, 34.0, 1.7, 0.1),
-            flat(20, 0.0),
+            wave(40, 8.0, 34.0, 1.7, 0.1),
+            flat(40, 0.0),
         ),
         // Native runner, idle.
         native_row(
@@ -138,8 +141,8 @@ fn demo_rows() -> Vec<RunnerRow> {
             0.4,
             96 * MIB,
             None,
-            wave(20, 0.1, 0.5, 1.2, 0.3),
-            flat(20, 0.0),
+            wave(40, 0.1, 0.5, 1.2, 0.3),
+            flat(40, 0.0),
         ),
     ]
 }
