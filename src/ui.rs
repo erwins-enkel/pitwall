@@ -1,5 +1,6 @@
 use crate::model::{
-    elapsed_secs, mem_level, slice_total_bytes, HostedJob, HostedStatus, Load, MemLevel, RunnerRow,
+    elapsed_secs, mem_level, slice_total_bytes, DeployStatus, Deployment, HostedJob, HostedStatus,
+    Load, MemLevel, RunnerRow,
 };
 use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -44,6 +45,9 @@ pub struct View<'a> {
     /// hosted section's `repo` column: with a single repo it's redundant, so the
     /// table stays 4-column and unchanged.
     pub multi_repo: bool,
+    /// In-flight Vercel deployments — building + queued — shown in their own
+    /// section below the hosted section. Empty ⇒ section hidden.
+    pub deployments: &'a [Deployment],
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -491,6 +495,133 @@ fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(table, area);
 }
 
+/// Max vercel rows rendered before collapsing the rest into a `+N more` line.
+const VERCEL_CAP: usize = 6;
+/// Fixed width for the `target` column — "production" is 10 cols.
+const VERCEL_TARGET_W: u16 = 10;
+
+/// Vertical cells the vercel section needs for `n` deployments: 0 when empty,
+/// else a header row + up to `VERCEL_CAP` rows + one overflow line when
+/// truncated. Mirrors [`hosted_height`].
+fn vercel_height(n: usize) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    let shown = n.min(VERCEL_CAP) as u16;
+    let overflow = if n > VERCEL_CAP { 1 } else { 0 };
+    1 + shown + overflow
+}
+
+/// Width for the vercel `repo` column: the widest `owner/repo` among the shown
+/// deployments (first `VERCEL_CAP`), floored at the `repo` header width.
+/// Mirrors [`repo_col_width`].
+fn deploy_repo_col_width(deps: &[Deployment]) -> u16 {
+    deps.iter()
+        .take(VERCEL_CAP)
+        .map(|d| UnicodeWidthStr::width(d.repo.as_str()))
+        .fold(REPO_HEADER_W, usize::max) as u16
+}
+
+/// Column constraints for the vercel table: `vercel` project (flex), an
+/// optional `repo` (`Some(w)` when multiple repos are polled), `target`,
+/// `branch` (flex), `elapsed`. Mirrors [`hosted_constraints`].
+fn vercel_constraints(repo_w: Option<u16>) -> Vec<Constraint> {
+    let mut c = vec![Constraint::Min(12)];
+    if let Some(w) = repo_w {
+        c.push(Constraint::Length(w));
+    }
+    c.push(Constraint::Length(VERCEL_TARGET_W));
+    c.push(Constraint::Min(8));
+    c.push(Constraint::Length(HOSTED_ELAPSED_W));
+    c
+}
+
+/// Per-column rects for the vercel table, mirroring [`hosted_col_layout`]'s
+/// read-back approach.
+fn vercel_col_layout(area: Rect, repo_w: Option<u16>) -> Vec<Rect> {
+    Layout::horizontal(vercel_constraints(repo_w))
+        .flex(Flex::Start)
+        .spacing(COL_SPACING)
+        .split(area)
+        .to_vec()
+}
+
+fn vercel_row(
+    d: &Deployment,
+    now: SystemTime,
+    p: &Palette,
+    project_w: usize,
+    branch_w: usize,
+    repo_w: Option<usize>,
+) -> Row<'static> {
+    let (glyph, color) = match d.status {
+        DeployStatus::Building => ('\u{25cf}', p.busy), // ●
+        DeployStatus::Queued => ('\u{25cb}', p.warn),   // ○
+    };
+    let project = format!("{} {}", glyph, d.project);
+    let branch = if d.branch.is_empty() {
+        "-".to_string()
+    } else {
+        d.branch.clone()
+    };
+    let elapsed = match d.status {
+        DeployStatus::Building => fmt_elapsed(elapsed_secs(d.started_at, now)),
+        DeployStatus::Queued => format!("queued {}", fmt_wait(elapsed_secs(d.started_at, now))),
+    };
+    let mut cells = vec![Cell::from(truncate_ellipsis(&project, project_w))];
+    if let Some(w) = repo_w {
+        cells.push(Cell::from(truncate_ellipsis_front(&d.repo, w)));
+    }
+    cells.push(Cell::from(truncate_ellipsis(
+        &d.target,
+        VERCEL_TARGET_W as usize,
+    )));
+    cells.push(Cell::from(truncate_ellipsis(&branch, branch_w)));
+    cells.push(Cell::from(truncate_ellipsis(
+        &elapsed,
+        HOSTED_ELAPSED_W as usize,
+    )));
+    Row::new(cells).style(Style::new().fg(color).bg(p.base))
+}
+
+fn render_vercel(frame: &mut Frame, area: Rect, view: &View) {
+    let p = view.palette;
+    // `repo` column only when polling more than one repo; mirrors render_hosted.
+    let repo_w = view
+        .multi_repo
+        .then(|| deploy_repo_col_width(view.deployments));
+    let header_cells = if view.multi_repo {
+        vec!["vercel", "repo", "target", "branch", "elapsed"]
+    } else {
+        vec!["vercel", "target", "branch", "elapsed"]
+    };
+    let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
+    let cols = vercel_col_layout(area, repo_w);
+    let project_w = cols[0].width as usize;
+    // Position-independent so the index shift from the optional repo column can't
+    // desync it: branch is always the second-to-last rect.
+    let branch_w = cols[cols.len() - 2].width as usize;
+    let repo_cell_w = repo_w.map(|_| cols[1].width as usize);
+
+    let n = view.deployments.len();
+    let shown = n.min(VERCEL_CAP);
+    let mut rows: Vec<Row> = view.deployments[..shown]
+        .iter()
+        .map(|d| vercel_row(d, view.now, p, project_w, branch_w, repo_cell_w))
+        .collect();
+    if n > VERCEL_CAP {
+        rows.push(
+            Row::new(vec![Cell::from(format!("+{} more", n - VERCEL_CAP))])
+                .style(Style::new().fg(p.idle).bg(p.base)),
+        );
+    }
+    let table = Table::new(rows, vercel_constraints(repo_w))
+        .header(header)
+        .column_spacing(COL_SPACING)
+        .style(Style::new().fg(p.text).bg(p.base));
+    frame.render_widget(table, area);
+}
+
 fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
     let total = slice_total_bytes(view.rows);
     let ratio = if view.slice_cap_bytes > 0 {
@@ -533,6 +664,7 @@ pub fn render(frame: &mut Frame, view: &View) {
 
     let has_banner = view.status.is_some();
     let hosted_h = hosted_height(view.hosted.len());
+    let vercel_h = vercel_height(view.deployments.len());
     let mut constraints = vec![Constraint::Length(1)];
     if has_banner {
         constraints.push(Constraint::Length(1));
@@ -540,6 +672,9 @@ pub fn render(frame: &mut Frame, view: &View) {
     constraints.push(Constraint::Min(1));
     if hosted_h > 0 {
         constraints.push(Constraint::Length(hosted_h));
+    }
+    if vercel_h > 0 {
+        constraints.push(Constraint::Length(vercel_h));
     }
     constraints.push(Constraint::Length(1));
     let chunks = Layout::vertical(constraints).split(frame.area());
@@ -570,6 +705,11 @@ pub fn render(frame: &mut Frame, view: &View) {
 
     if hosted_h > 0 {
         render_hosted(frame, chunks[idx], view);
+        idx += 1;
+    }
+
+    if vercel_h > 0 {
+        render_vercel(frame, chunks[idx], view);
         idx += 1;
     }
 
@@ -625,6 +765,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -832,6 +973,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -985,6 +1127,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1047,6 +1190,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1092,6 +1236,7 @@ mod tests {
                         crit_ratio: 0.90,
                         hosted: &[],
                         multi_repo: false,
+                        deployments: &[],
                     },
                 );
             })
@@ -1124,6 +1269,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1239,6 +1385,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1316,6 +1463,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &hosted,
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1367,6 +1515,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &hosted,
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1426,6 +1575,7 @@ mod tests {
                         crit_ratio: 0.90,
                         hosted: &hosted,
                         multi_repo,
+                        deployments: &[],
                     },
                 );
             })
@@ -1468,6 +1618,7 @@ mod tests {
                     crit_ratio: 0.90,
                     hosted: &[],
                     multi_repo: false,
+                    deployments: &[],
                 },
             );
         })
@@ -1481,5 +1632,106 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("waiting for runner stats"));
         assert!(!content.contains("none match"));
+    }
+
+    fn deployment(project: &str, status: DeployStatus, ago: u64, now: SystemTime) -> Deployment {
+        Deployment {
+            repo: "o/r".into(),
+            project: project.into(),
+            target: "production".into(),
+            branch: "main".into(),
+            commit_summary: "fix: thing".into(),
+            status,
+            started_at: now - std::time::Duration::from_secs(ago),
+        }
+    }
+
+    fn draw_with_deployments(deployments: &[Deployment]) -> Terminal<TestBackend> {
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &[],
+                    multi_repo: false,
+                    deployments,
+                },
+            );
+        })
+        .unwrap();
+        term
+    }
+
+    #[test]
+    fn vercel_height_is_zero_when_empty_and_caps_with_overflow() {
+        assert_eq!(vercel_height(0), 0);
+        assert_eq!(vercel_height(3), 1 + 3); // header + 3 rows
+        assert_eq!(vercel_height(VERCEL_CAP), 1 + VERCEL_CAP as u16);
+        // over cap → header + CAP rows + one "+N more" line
+        assert_eq!(vercel_height(VERCEL_CAP + 5), 1 + VERCEL_CAP as u16 + 1);
+    }
+
+    #[test]
+    fn vercel_section_renders_building_and_queued() {
+        let now = SystemTime::now();
+        let deployments = vec![
+            deployment("pulse", DeployStatus::Building, 30, now),
+            deployment("shepherd", DeployStatus::Queued, 10, now),
+        ];
+        let term = draw_with_deployments(&deployments);
+        let content = text(&term);
+        assert!(content.contains("pulse"));
+        assert!(content.contains("shepherd"));
+        assert!(content.contains('\u{25cf}'), "building glyph should render");
+        assert!(content.contains('\u{25cb}'), "queued glyph should render");
+        assert!(
+            content.contains("queued"),
+            "queued elapsed cell should render"
+        );
+        assert!(content.contains("vercel"), "vercel header should render");
+    }
+
+    #[test]
+    fn vercel_section_auto_hides_when_empty() {
+        let term = draw_with_deployments(&[]);
+        let content = text(&term);
+        assert!(!content.contains("vercel"));
+        assert_eq!(vercel_height(0), 0);
+    }
+
+    #[test]
+    fn vercel_overflow_collapses_but_keeps_building_visible() {
+        // Pre-sorted (as vercel::run would send): building first, then 7 queued.
+        // render does not sort — it caps at VERCEL_CAP and collapses the rest.
+        let now = SystemTime::now();
+        let mut deployments = vec![deployment("pulse", DeployStatus::Building, 30, now)];
+        for i in 0..7 {
+            deployments.push(deployment(
+                &format!("proj-{i}"),
+                DeployStatus::Queued,
+                5,
+                now,
+            ));
+        }
+        assert_eq!(deployments.len(), 8);
+        let term = draw_with_deployments(&deployments);
+        let content = text(&term);
+        assert!(
+            content.contains('\u{25cf}'),
+            "building glyph should still be visible past the cap"
+        );
+        // 8 deployments, VERCEL_CAP=6 shown → 2 collapse into the overflow line.
+        assert!(content.contains("+2 more"));
     }
 }

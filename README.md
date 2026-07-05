@@ -52,6 +52,26 @@ and elapsed (running) or wait time (`queued 8s`, from the job's creation).
 - The section is hidden when there are no hosted jobs, and caps at a handful of
   rows with a `+N more` line so a large matrix can't crowd out the runner table.
 
+## Vercel deployments
+
+Below the hosted section, pitwall lists **in-flight Vercel builds** for the
+configured repos — both building and queued — hidden entirely when nothing is
+building. Columns: `project`, `target`, `branch`, and elapsed (building) or
+wait time (`queued 8s`, from the deployment's creation).
+
+- `●` a building deployment; `○` a queued one (waiting for a build slot).
+- Data source: shells out to the `vercel` CLI (`vercel list --format json
+  --status BUILDING,QUEUED`) — it reuses your `vercel login` session, so no
+  token is needed. Auto-detected: if `vercel` isn't installed or you're not
+  logged in, the section is simply absent, no error banner.
+- A deployment is shown when its `meta.githubOrg`/`meta.githubRepo` matches
+  one of your configured `repo`s.
+- **`vercel list` only sees the CLI's active Vercel scope/team.** pitwall is
+  multi-repo, and repos under different owners commonly map to different
+  Vercel teams — so a configured repo whose Vercel project lives under
+  another team shows **nothing** here. This is by design, not a bug: an empty
+  Vercel section for that repo is the expected result of a single-scope CLI.
+
 ## Requirements
 
 - Linux with cgroup v2 (native runners read `/sys/fs/cgroup`) and `systemctl` (for native runner discovery — optional; absent = docker-only)

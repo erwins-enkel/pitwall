@@ -1,11 +1,12 @@
 use crate::config::Config;
 use crate::history::History;
 use crate::jobs::{self, JobsUpdate};
-use crate::model::{join, HostedJob, JobInfo, RunnerKey, RunnerResource, SourceKind};
+use crate::model::{join, Deployment, HostedJob, JobInfo, RunnerKey, RunnerResource, SourceKind};
 use crate::resource::ResourceUpdate;
 use crate::resource_native::discover;
 use crate::theme::Palette;
 use crate::ui::{self, View};
+use crate::vercel::{self, VercelUpdate};
 use crate::{resource_docker, resource_native};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
@@ -23,6 +24,8 @@ struct AppState {
     jobs: HashMap<RunnerKey, Option<JobInfo>>,
     jobs_err: Option<String>,
     hosted: Vec<HostedJob>,
+    /// In-flight Vercel deployments from the last successful poll.
+    deployments: Vec<Deployment>,
     history: History,
     /// From the last successful docker poll: containers whose name matched the
     /// prefix, and those that didn't. Drives the empty-state hint (a docker-only
@@ -66,16 +69,19 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
 
     let (tx_res, mut rx_res) = mpsc::channel::<ResourceUpdate>(8);
     let (tx_jobs, mut rx_jobs) = mpsc::channel::<JobsUpdate>(8);
+    let (tx_vercel, mut rx_vercel) = mpsc::channel::<VercelUpdate>(8);
 
     tokio::spawn(resource_docker::run(cfg.clone(), tx_res.clone()));
     tokio::spawn(resource_native::run(natives, tx_res));
     tokio::spawn(jobs::run(cfg.clone(), tx_jobs));
+    tokio::spawn(vercel::run(cfg.clone(), tx_vercel));
 
     let mut state = AppState::default();
     let mut events = EventStream::new();
     let mut ticker = interval(Duration::from_secs(1));
     let mut res_alive = true;
     let mut jobs_alive = true;
+    let mut vercel_alive = true;
 
     draw(
         &mut terminal,
@@ -105,6 +111,10 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
             jobs = rx_jobs.recv(), if jobs_alive => match jobs {
                 Some(update) => apply_jobs_update(&mut state, update),
                 None => jobs_alive = false,
+            },
+            dep = rx_vercel.recv(), if vercel_alive => match dep {
+                Some(update) => apply_vercel_update(&mut state, update),
+                None => vercel_alive = false,
             },
             _ = ticker.tick() => {}
         }
@@ -172,6 +182,12 @@ fn apply_jobs_update(state: &mut AppState, update: JobsUpdate) {
     state.hosted = update.hosted;
 }
 
+/// Applies a Vercel poll result. Sorting + last-known-good policy live in
+/// `vercel::run` (it clears to empty on error), so here we simply replace.
+fn apply_vercel_update(state: &mut AppState, update: VercelUpdate) {
+    state.deployments = update.deployments;
+}
+
 fn is_quit(key: &KeyEvent) -> bool {
     if key.kind != KeyEventKind::Press {
         return false;
@@ -220,6 +236,7 @@ fn draw(
                 crit_ratio,
                 hosted: &state.hosted,
                 multi_repo,
+                deployments: &state.deployments,
             },
         );
     })?;
