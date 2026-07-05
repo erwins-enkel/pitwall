@@ -103,6 +103,10 @@ fn is_self_hosted(labels: &serde_json::Value) -> bool {
 /// Hosted (non-self-hosted) jobs in status `in_progress`/`queued` from a run's
 /// jobs payload. `since` is `started_at` for running jobs, `created_at` for
 /// queued. `label` is the first requested label (e.g. `ubuntu-latest`).
+/// The hosted/self-hosted split is decided by [`is_self_hosted`] off the job's
+/// `labels`, which just echo the workflow's `runs-on` request: a self-hosted
+/// workflow whose `runs-on` is a bare custom label (no `self-hosted` in the
+/// list) would also surface here as "hosted".
 pub fn parse_hosted_jobs(workflow: &str, branch: &str, json: &str) -> Vec<HostedJob> {
     let v: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,

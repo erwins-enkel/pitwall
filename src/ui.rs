@@ -1221,6 +1221,66 @@ mod tests {
     }
 
     #[test]
+    fn hosted_section_shows_running_glyph_queued_label_and_overflow_count() {
+        // 8 hosted jobs > HOSTED_CAP (6): a queued row sits inside the shown
+        // window (mixed with running ones) so both indicators are on-screen,
+        // and the trailing 2 collapse into the "+2 more" overflow line.
+        let now = SystemTime::now();
+        let mut hosted = vec![HostedJob {
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-24.04".into(),
+            branch: "main".into(),
+            status: HostedStatus::Queued,
+            since: now - std::time::Duration::from_secs(10),
+        }];
+        for i in 0..7 {
+            hosted.push(HostedJob {
+                workflow: "CI".into(),
+                job: format!("Build-{i}"),
+                label: "ubuntu-latest".into(),
+                branch: "main".into(),
+                status: HostedStatus::InProgress,
+                since: now - std::time::Duration::from_secs(30),
+            });
+        }
+        assert_eq!(hosted.len(), 8);
+
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        assert!(content.contains('\u{25cf}'), "running glyph should render");
+        assert!(
+            content.contains("queued"),
+            "queued elapsed cell should render"
+        );
+        // 8 jobs, HOSTED_CAP=6 shown → 2 collapse into the overflow line.
+        assert!(
+            content.contains("+2 more"),
+            "overflow line should show +2 more"
+        );
+    }
+
+    #[test]
     fn empty_rows_with_matched_but_no_stats_shows_stats_pending() {
         // Runners matched the prefix but stats weren't ready → must NOT claim a
         // prefix mismatch (the critic's false-"none match" case).
