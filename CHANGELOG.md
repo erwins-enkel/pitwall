@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.2.0...pitwall-v0.3.0) (2026-07-05)
+
+
+### Features
+
+* **ui:** btop-style boxes around TUI sections ([#39](https://github.com/erwins-enkel/pitwall/issues/39)) ([daf9fed](https://github.com/erwins-enkel/pitwall/commit/daf9fed85617ce9186d7173a630f7f230c9512c7))
+* **ui:** btop-style braille gradient sparklines ([#37](https://github.com/erwins-enkel/pitwall/issues/37)) ([ec3d0df](https://github.com/erwins-enkel/pitwall/commit/ec3d0df47d5b5bd536eba8465286c78418482181))
+* **ui:** btop-style sparkline for the memory section ([#41](https://github.com/erwins-enkel/pitwall/issues/41)) ([0093b1f](https://github.com/erwins-enkel/pitwall/commit/0093b1f3a370d0e33d037b5086a348d5a2ba856e))
+* vercel deployment build status in the TUI ([#38](https://github.com/erwins-enkel/pitwall/issues/38)) ([9f2fb74](https://github.com/erwins-enkel/pitwall/commit/9f2fb74812e55f9d306d740f6b724e7cbf2e05df))
+
+
+### Bug Fixes
+
+* draft-first release flow for immutable-releases compatibility ([#31](https://github.com/erwins-enkel/pitwall/issues/31)) ([211a315](https://github.com/erwins-enkel/pitwall/commit/211a3155e81c8465cc260903c4383506ff54c0d3))
+* **ui:** rename runner-table header to "name" ([#40](https://github.com/erwins-enkel/pitwall/issues/40)) ([066e769](https://github.com/erwins-enkel/pitwall/commit/066e769d473ae4588c259608c983bcae23635c4a))
+
 ## [0.2.0](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.1.0...pitwall-v0.2.0) (2026-07-05)
 
 
