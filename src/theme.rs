@@ -41,8 +41,6 @@ pub struct Palette {
     pub warn: Color,
     /// Near memory-cap rows.
     pub near_cap: Color,
-    /// Memory gauge fill.
-    pub gauge: Color,
     /// Status banner.
     pub error: Color,
     /// Title accent.
@@ -56,7 +54,7 @@ impl Palette {
     /// Build the palette for a flavor from its official Catppuccin hex values
     /// (see https://catppuccin.com/palette). Role mapping: base=base,
     /// text=text, idle=overlay0, busy=green, warn=yellow, near_cap/error=red,
-    /// gauge=teal, accent=mauve.
+    /// accent=mauve.
     pub fn for_flavor(flavor: Flavor) -> Palette {
         match flavor {
             Flavor::Mocha => Palette {
@@ -66,7 +64,6 @@ impl Palette {
                 busy: Color::Rgb(166, 227, 161),     // #a6e3a1 green
                 warn: Color::Rgb(249, 226, 175),     // #f9e2af yellow
                 near_cap: Color::Rgb(243, 139, 168), // #f38ba8 red
-                gauge: Color::Rgb(148, 226, 213),    // #94e2d5 teal
                 error: Color::Rgb(243, 139, 168),    // #f38ba8 red
                 accent: Color::Rgb(203, 166, 247),   // #cba6f7 mauve
                 is_light: false,
@@ -78,7 +75,6 @@ impl Palette {
                 busy: Color::Rgb(166, 218, 149),     // #a6da95 green
                 warn: Color::Rgb(238, 212, 159),     // #eed49f yellow
                 near_cap: Color::Rgb(237, 135, 150), // #ed8796 red
-                gauge: Color::Rgb(139, 213, 202),    // #8bd5ca teal
                 error: Color::Rgb(237, 135, 150),    // #ed8796 red
                 accent: Color::Rgb(198, 160, 246),   // #c6a0f6 mauve
                 is_light: false,
@@ -90,7 +86,6 @@ impl Palette {
                 busy: Color::Rgb(166, 209, 137),     // #a6d189 green
                 warn: Color::Rgb(229, 200, 144),     // #e5c890 yellow
                 near_cap: Color::Rgb(231, 130, 132), // #e78284 red
-                gauge: Color::Rgb(129, 200, 190),    // #81c8be teal
                 error: Color::Rgb(231, 130, 132),    // #e78284 red
                 accent: Color::Rgb(202, 158, 230),   // #ca9ee6 mauve
                 is_light: false,
@@ -102,7 +97,6 @@ impl Palette {
                 busy: Color::Rgb(64, 160, 43),     // #40a02b green
                 warn: Color::Rgb(223, 142, 29),    // #df8e1d yellow
                 near_cap: Color::Rgb(210, 15, 57), // #d20f39 red
-                gauge: Color::Rgb(23, 146, 153),   // #179299 teal
                 error: Color::Rgb(210, 15, 57),    // #d20f39 red
                 accent: Color::Rgb(136, 57, 239),  // #8839ef mauve
                 is_light: true,

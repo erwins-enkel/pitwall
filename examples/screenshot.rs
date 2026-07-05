@@ -13,6 +13,7 @@
 //! hard error, not a silent fallback. Override the font directory with
 //! `PITWALL_SCREENSHOT_FONT_DIR` (default `/usr/share/fonts/TTF`).
 
+use pitwall::history::SLICE_WINDOW;
 use pitwall::model::{
     mem_level, HostedJob, HostedStatus, JobInfo, Load, MemLevel, RunnerRow, SourceKind,
 };
@@ -54,6 +55,12 @@ fn main() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let hosted = demo_hosted(now);
 
+    // Deterministic slice-memory history for the memory box's sparkline: a rising
+    // trend that stays in the Normal band (below WARN·SLICE_CAP ≈ 20.4 GiB), which
+    // matches the demo rows summing to ~18.3 GiB of the 24 GiB cap. Length
+    // SLICE_WINDOW fills the full-width sparkline in the 160-col demo.
+    let slice_mem = wave(SLICE_WINDOW, 12.0 * GIB as f64, 19.0 * GIB as f64, 2.6, 0.0);
+
     let mut term = Terminal::new(TestBackend::new(COLS, ROWS)).expect("terminal");
     term.draw(|f| {
         render(
@@ -61,6 +68,7 @@ fn main() {
             &View {
                 rows: &rows,
                 slice_cap_bytes: SLICE_CAP,
+                slice_mem_hist: &slice_mem,
                 now,
                 status: None,
                 palette: &palette,

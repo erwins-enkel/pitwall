@@ -6,7 +6,7 @@ use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Cell, Gauge, Padding, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Cell, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 use std::time::SystemTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -29,6 +29,10 @@ const BRAILLE_RIGHT: [u32; 5] = [0x00, 0x80, 0xA0, 0xB0, 0xB8];
 pub struct View<'a> {
     pub rows: &'a [RunnerRow],
     pub slice_cap_bytes: u64,
+    /// Aggregate docker-slice total-memory history (raw bytes, oldest→newest)
+    /// driving the `memory` section's sparkline. Empty until the first docker
+    /// poll records.
+    pub slice_mem_hist: &'a [f64],
     pub now: SystemTime,
     pub status: Option<String>,
     pub palette: &'a Palette,
@@ -768,35 +772,68 @@ fn render_vercel(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(table, area);
 }
 
-fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
+/// The widest memory marker; its rendered width is reserved even when no marker
+/// is shown so the sparkline's left edge doesn't shift as the band crosses into
+/// or out of the alert markers.
+const WIDEST_MEM_MARKER: &str = " \u{26a0} NEAR CAP";
+
+fn render_memory(frame: &mut Frame, area: Rect, view: &View) {
     let total = slice_total_bytes(view.rows);
-    let ratio = if view.slice_cap_bytes > 0 {
-        (total as f64 / view.slice_cap_bytes as f64).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let cap_gib = (view.slice_cap_bytes as f64 / GIB).round() as u64;
+    let cap = view.slice_cap_bytes;
+    let cap_gib = (cap as f64 / GIB).round() as u64;
     let p = view.palette;
-    // Same classifier as the per-runner mem cells, mapped onto themed roles:
-    // gauge (normal) / warn / near_cap. A text marker keeps the alert from being
-    // color-only.
-    let (fill, marker) = match mem_level(
-        total,
-        view.slice_cap_bytes,
-        view.warn_ratio,
-        view.crit_ratio,
-    ) {
-        MemLevel::Normal => (p.gauge, ""),
+    // Same classifier as the per-runner mem cells: the label color and text
+    // marker follow Normal → text / Warn → warn / Critical → near_cap, exactly
+    // like a runner's mem cell. The sparkline's green→yellow→red gradient carries
+    // the heat; the text marker keeps the alert from being color-only.
+    let (label_color, marker) = match mem_level(total, cap, view.warn_ratio, view.crit_ratio) {
+        MemLevel::Normal => (p.text, ""),
         MemLevel::Warn => (p.warn, " \u{26a0} warn"),
         MemLevel::Critical => (p.near_cap, " \u{26a0} NEAR CAP"),
     };
-    let label = format!("{:.1} / {} GiB{}", total as f64 / GIB, cap_gib, marker);
-    let gauge = Gauge::default()
-        .ratio(ratio)
-        .label(label)
-        .style(Style::new().bg(p.base))
-        .gauge_style(Style::new().fg(fill).bg(p.base));
-    frame.render_widget(gauge, area);
+    let numeric = format!("{:.1} / {} GiB", total as f64 / GIB, cap_gib);
+    // Reserve a fixed slot for the numeric label plus the widest possible marker,
+    // so the sparkline starts at the same column in every band (no jump when the
+    // marker appears/disappears). Measured by display width for correct alignment.
+    let label_region =
+        UnicodeWidthStr::width(numeric.as_str()) + UnicodeWidthStr::width(WIDEST_MEM_MARKER);
+    let label = format!("{numeric}{marker}");
+    let label_pad = label_region.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+
+    let mut spans = vec![
+        Span::styled(label, Style::new().fg(label_color).bg(p.base)),
+        // Padding fills the reserved-but-unused marker slot, then one column of
+        // gap before the sparkline.
+        Span::styled(" ".repeat(label_pad + 1), Style::new().bg(p.base)),
+    ];
+
+    // Sparkline fills whatever width is left after the reserved label region.
+    let spark_width = (area.width as usize).saturating_sub(label_region + 1);
+    if spark_width > 0 {
+        // Raw slice-total bytes scaled against the cap, mirroring how the CPU
+        // column scales raw percent against its window max. A zero cap can't be
+        // divided, so fall back to a flat baseline (height_max 0) with the idle
+        // gradient anchor.
+        let height_max = if cap > 0 { cap as f64 } else { 0.0 };
+        let cap_f = cap as f64;
+        let spark = spark_line(
+            view.slice_mem_hist,
+            height_max,
+            spark_width,
+            p,
+            false,
+            |v| {
+                if cap > 0 {
+                    gradient(v / cap_f, view.warn_ratio, view.crit_ratio, p)
+                } else {
+                    p.busy
+                }
+            },
+        );
+        spans.extend(spark.spans);
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// A btop-style section panel: a rounded box with `title` set into the top-left
@@ -898,11 +935,11 @@ pub fn render(frame: &mut Frame, view: &View) {
         render_vercel(frame, inner, view);
     }
 
-    let gauge_area = chunks[idx];
-    let gauge_block = section_block("memory", p);
-    let gauge_inner = gauge_block.inner(gauge_area);
-    frame.render_widget(gauge_block, gauge_area);
-    render_gauge(frame, gauge_inner, view);
+    let memory_area = chunks[idx];
+    let memory_block = section_block("memory", p);
+    let memory_inner = memory_block.inner(memory_area);
+    frame.render_widget(memory_block, memory_area);
+    render_memory(frame, memory_inner, view);
 }
 
 #[cfg(test)]
@@ -943,6 +980,7 @@ mod tests {
                 &View {
                     rows,
                     slice_cap_bytes,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -1298,6 +1336,7 @@ mod tests {
                 &View {
                     rows,
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -1457,6 +1496,7 @@ mod tests {
                 &View {
                     rows,
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -1520,6 +1560,7 @@ mod tests {
                 &View {
                     rows: &rows,
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -1568,6 +1609,7 @@ mod tests {
                     &View {
                         rows: &[],
                         slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                        slice_mem_hist: &[],
                         now: SystemTime::now(),
                         status: None,
                         palette: &palette,
@@ -1601,6 +1643,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: Some("docker: unreachable".into()),
                     palette: &palette,
@@ -1666,31 +1709,84 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gauge_is_normal_color_and_unmarked_when_normal() {
-        // Slice total well below warn: 1 GiB of a 24 GiB cap.
-        let m = Palette::for_flavor(Flavor::Mocha);
-        let rows = vec![row(1024 * 1024 * 1024, Load::Busy, MemLevel::Normal)];
-        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
-        assert!(has_fg(&term, m.gauge), "gauge should use the normal color");
-        let content = text(&term);
-        assert!(!content.contains("warn"));
-        assert!(!content.contains("NEAR CAP"));
+    /// Renders `rows` with a slice-memory `hist` and returns the fg colors and
+    /// symbols of the **memory box's content row**. The memory box is the last
+    /// section (`Length(3)`), so its content row is `height - 2` (border / content
+    /// / border); no runner data lives on that row, so a color found here comes
+    /// from the memory label or its sparkline alone — never a runner row. That is
+    /// what makes these asserts discriminating, where a whole-buffer scan would be
+    /// satisfied by a Busy/Warn/NearCap runner row painting the same color.
+    fn memory_row(rows: &[RunnerRow], cap: u64, hist: &[f64]) -> (Vec<Color>, String) {
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let (w, h) = (140u16, 12u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows,
+                    slice_cap_bytes: cap,
+                    slice_mem_hist: hist,
+                    now: SystemTime::now(),
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &[],
+                    multi_repo: false,
+                    deployments: &[],
+                },
+            );
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let y = h - 2;
+        let colors = (0..w).map(|x| buf[(x, y)].fg).collect();
+        let text = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        (colors, text)
     }
 
     #[test]
-    fn gauge_warn_color_with_marker_in_warn_band() {
+    fn memory_sparkline_normal_color_and_unmarked_when_normal() {
+        // Slice total well below warn (1 GiB of 24), and a below-warn history so
+        // the sparkline paints the gradient's below-warn (busy) color.
+        let m = Palette::for_flavor(Flavor::Mocha);
+        let cap = 24 * 1024 * 1024 * 1024;
+        let rows = vec![row(1024 * 1024 * 1024, Load::Busy, MemLevel::Normal)];
+        let hist = [cap as f64 * 0.4, cap as f64 * 0.5, cap as f64 * 0.45];
+        let (colors, text) = memory_row(&rows, cap, &hist);
+        // The Normal label is p.text, so p.busy on the memory row can only be the
+        // sparkline — proving it painted.
+        assert!(
+            colors.contains(&m.busy),
+            "sparkline should use the busy color"
+        );
+        assert!(!colors.contains(&m.warn));
+        assert!(!colors.contains(&m.near_cap));
+        assert!(!text.contains("warn"));
+        assert!(!text.contains("NEAR CAP"));
+    }
+
+    #[test]
+    fn memory_warn_color_with_marker_in_warn_band() {
         // Slice total 87% of a 4 GiB cap → warn band.
         let m = Palette::for_flavor(Flavor::Mocha);
         let cap = 4 * 1024 * 1024 * 1024;
         let rows = vec![row((cap as f64 * 0.87) as u64, Load::Busy, MemLevel::Warn)];
-        let term = draw(&rows, cap);
-        assert!(has_fg(&term, m.warn), "gauge should use the warn color");
-        assert!(text(&term).contains("\u{26a0} warn"));
+        let hist = [cap as f64 * 0.87];
+        let (colors, text) = memory_row(&rows, cap, &hist);
+        assert!(
+            colors.contains(&m.warn),
+            "memory box should use the warn color"
+        );
+        assert!(text.contains("\u{26a0} warn"));
     }
 
     #[test]
-    fn gauge_red_with_marker_when_critical() {
+    fn memory_red_color_with_marker_when_critical() {
         // Slice total 95% of a 4 GiB cap → critical.
         let m = Palette::for_flavor(Flavor::Mocha);
         let cap = 4 * 1024 * 1024 * 1024;
@@ -1699,12 +1795,13 @@ mod tests {
             Load::NearCap,
             MemLevel::Critical,
         )];
-        let term = draw(&rows, cap);
+        let hist = [cap as f64 * 0.95];
+        let (colors, text) = memory_row(&rows, cap, &hist);
         assert!(
-            has_fg(&term, m.near_cap),
-            "gauge should use the near_cap color"
+            colors.contains(&m.near_cap),
+            "memory box should use the near_cap color"
         );
-        assert!(text(&term).contains("\u{26a0} NEAR CAP"));
+        assert!(text.contains("\u{26a0} NEAR CAP"));
     }
 
     #[test]
@@ -1717,6 +1814,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -1795,6 +1893,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now,
                     status: None,
                     palette: &palette,
@@ -1855,6 +1954,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now,
                     status: None,
                     palette: &palette,
@@ -1904,6 +2004,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now,
                     status: None,
                     palette: &palette,
@@ -1969,6 +2070,7 @@ mod tests {
                     &View {
                         rows: &[],
                         slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                        slice_mem_hist: &[],
                         now,
                         status: None,
                         palette: &palette,
@@ -2012,6 +2114,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -2059,6 +2162,7 @@ mod tests {
                 &View {
                     rows: &[],
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now: SystemTime::now(),
                     status: None,
                     palette: &palette,
@@ -2178,6 +2282,7 @@ mod tests {
                 &View {
                     rows: &rows,
                     slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    slice_mem_hist: &[],
                     now,
                     status: None,
                     palette: &palette,
