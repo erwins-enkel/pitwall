@@ -40,6 +40,44 @@ pub struct JobInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedStatus {
+    InProgress,
+    Queued,
+}
+
+/// A GitHub-hosted job (running or queued) shown in the hosted section. Hosted
+/// runners are ephemeral per-job VMs with no obtainable CPU/mem, so this carries
+/// only job-level facts. `since` is `started_at` for running jobs and
+/// `created_at` for queued jobs, so `elapsed_secs(since, now)` yields elapsed or
+/// wait time respectively.
+#[derive(Debug, Clone)]
+pub struct HostedJob {
+    pub workflow: String,
+    pub job: String,
+    pub label: String,
+    pub branch: String,
+    pub status: HostedStatus,
+    pub since: SystemTime,
+}
+
+fn hosted_status_order(s: HostedStatus) -> u8 {
+    match s {
+        HostedStatus::InProgress => 0,
+        HostedStatus::Queued => 1,
+    }
+}
+
+/// Sort running jobs before queued, and within each group longest-first
+/// (largest elapsed/wait). Stable ordering for the hosted section.
+pub fn sort_hosted(jobs: &mut [HostedJob], now: SystemTime) {
+    jobs.sort_by(|a, b| {
+        hosted_status_order(a.status)
+            .cmp(&hosted_status_order(b.status))
+            .then_with(|| elapsed_secs(b.since, now).cmp(&elapsed_secs(a.since, now)))
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Load {
     Idle,
     Busy,
@@ -469,5 +507,30 @@ mod tests {
         let rows = join(vec![row_res], &jobs, &History::default(), WARN, CRIT);
         assert!(matches!(rows[0].load, Load::Idle));
         assert!(rows[0].job.is_none());
+    }
+
+    #[test]
+    fn sort_hosted_running_first_then_longest_first() {
+        let now = SystemTime::now();
+        fn j(job: &str, status: HostedStatus, ago: u64, now: SystemTime) -> HostedJob {
+            HostedJob {
+                workflow: "w".into(),
+                job: job.into(),
+                label: "ubuntu-latest".into(),
+                branch: "main".into(),
+                status,
+                since: now - Duration::from_secs(ago),
+            }
+        }
+        let mut v = vec![
+            j("q-new", HostedStatus::Queued, 5, now),
+            j("run-new", HostedStatus::InProgress, 10, now),
+            j("q-old", HostedStatus::Queued, 90, now),
+            j("run-old", HostedStatus::InProgress, 120, now),
+        ];
+        sort_hosted(&mut v, now);
+        let order: Vec<&str> = v.iter().map(|h| h.job.as_str()).collect();
+        // running first (longest elapsed first), then queued (longest wait first)
+        assert_eq!(order, vec!["run-old", "run-new", "q-old", "q-new"]);
     }
 }
