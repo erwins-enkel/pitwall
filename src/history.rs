@@ -5,6 +5,13 @@ use std::collections::HashMap;
 /// cadence this is ~80s of history.
 pub const WINDOW: usize = 40;
 
+/// Retention for the aggregate slice-memory series. Larger than `WINDOW` because
+/// the memory section renders a *full-width* sparkline (one cell per two
+/// samples), so a wide terminal needs more history to fill: 480 samples ≈ 16 min
+/// at the 2s cadence covers up to ~240 sparkline cells. Past that width the
+/// leading cells stay blank (the graph is right-anchored).
+pub const SLICE_WINDOW: usize = 480;
+
 #[derive(Default)]
 struct RunnerSeries {
     cpu: Vec<f64>,      // percent, oldest→newest
@@ -12,16 +19,18 @@ struct RunnerSeries {
 }
 
 /// Bounded per-runner history of CPU% and memory fill, keyed by container name
-/// (`pulse-ci-runner-N`, stable across ephemeral re-registration).
+/// (`pulse-ci-runner-N`, stable across ephemeral re-registration), plus the
+/// aggregate docker-slice total-memory series driving the memory section.
 #[derive(Default)]
 pub struct History {
     series: HashMap<String, RunnerSeries>,
+    slice_mem: Vec<f64>, // slice-total bytes, oldest→newest
 }
 
-fn push_capped(v: &mut Vec<f64>, x: f64) {
+fn push_capped(v: &mut Vec<f64>, x: f64, max: usize) {
     v.push(x);
-    if v.len() > WINDOW {
-        v.remove(0); // FIFO eviction; WINDOW is tiny so O(n) is fine
+    if v.len() > max {
+        v.remove(0); // FIFO eviction; the window is tiny so O(n) is fine
     }
 }
 
@@ -36,16 +45,31 @@ impl History {
     pub fn record(&mut self, sample: &[RunnerResource], retain: &[RunnerResource]) {
         for r in sample {
             let s = self.series.entry(r.name.clone()).or_default();
-            push_capped(&mut s.cpu, r.cpu_pct);
+            push_capped(&mut s.cpu, r.cpu_pct, WINDOW);
             let frac = if r.mem_limit > 0 {
                 r.mem_bytes as f64 / r.mem_limit as f64
             } else {
                 0.0
             };
-            push_capped(&mut s.mem_frac, frac);
+            push_capped(&mut s.mem_frac, frac, WINDOW);
         }
         self.series
             .retain(|name, _| retain.iter().any(|r| &r.name == name));
+    }
+
+    /// Appends one aggregate slice-total memory sample (raw bytes), FIFO-bounded
+    /// to [`SLICE_WINDOW`]. The app records this once per applied docker poll (the
+    /// slice is docker-only). Kept as raw bytes so the renderer divides by the
+    /// live cap; the sparkline scales `bytes / cap` exactly like the CPU column
+    /// scales percent against its window max.
+    pub fn record_slice(&mut self, total_bytes: u64) {
+        push_capped(&mut self.slice_mem, total_bytes as f64, SLICE_WINDOW);
+    }
+
+    /// Aggregate slice-total memory series (raw bytes), oldest→newest; empty
+    /// until the first docker poll records.
+    pub fn slice_mem(&self) -> &[f64] {
+        self.slice_mem.as_slice()
     }
 
     /// CPU% series for a runner, oldest→newest; empty if unknown.
@@ -154,5 +178,32 @@ mod tests {
         let h = History::default();
         assert!(h.cpu("nope").is_empty());
         assert!(h.mem_frac("nope").is_empty());
+    }
+
+    #[test]
+    fn slice_mem_records_one_point_per_call() {
+        let mut h = History::default();
+        h.record_slice(100);
+        h.record_slice(250);
+        assert_eq!(h.slice_mem(), &[100.0, 250.0]);
+    }
+
+    #[test]
+    fn slice_mem_bounded_to_slice_window_with_fifo_eviction() {
+        let mut h = History::default();
+        for i in 0..(SLICE_WINDOW as u64 + 5) {
+            h.record_slice(i);
+        }
+        let s = h.slice_mem();
+        assert_eq!(s.len(), SLICE_WINDOW);
+        // Oldest 5 evicted: series starts at 5, ends at SLICE_WINDOW+4.
+        assert_eq!(s.first(), Some(&5.0));
+        assert_eq!(s.last(), Some(&((SLICE_WINDOW as f64) + 4.0)));
+    }
+
+    #[test]
+    fn slice_mem_empty_until_recorded() {
+        let h = History::default();
+        assert!(h.slice_mem().is_empty());
     }
 }

@@ -171,6 +171,18 @@ fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
         }
         .clone();
         state.history.record(&sample, &all);
+        // The memory section's slice sparkline tracks the docker-slice total only,
+        // so record one aggregate sample per applied *docker* poll. Skip the
+        // transient "stats not ready" empty (containers match the prefix but
+        // Docker hasn't returned stats yet: `matched_seen > 0`, no resources) so
+        // it can't inject a persistent baseline dip; a genuine zero
+        // (`matched_seen == 0`: nothing matches) is the truth and is recorded.
+        if update.source == SourceKind::Docker
+            && (!state.docker_resources.is_empty() || state.matched_seen == 0)
+        {
+            let total: u64 = state.docker_resources.iter().map(|r| r.mem_bytes).sum();
+            state.history.record_slice(total);
+        }
     }
 }
 
@@ -227,6 +239,7 @@ fn draw(
             &View {
                 rows: &rows,
                 slice_cap_bytes,
+                slice_mem_hist: state.history.slice_mem(),
                 now: SystemTime::now(),
                 status,
                 palette,
@@ -401,6 +414,60 @@ mod tests {
         );
         // The error poll neither appended a point nor cleared the series.
         assert_eq!(state.history.cpu("pulse-ci-runner-1").len(), before);
+    }
+
+    #[test]
+    fn docker_poll_with_resources_appends_slice_point() {
+        let mut state = AppState::default();
+        apply_resource_update(
+            &mut state,
+            docker_update(
+                vec![resource("pulse-ci-runner-1", SourceKind::Docker)],
+                None,
+            ),
+        );
+        // resource() has mem_bytes 100 → the slice total is that one runner.
+        assert_eq!(state.history.slice_mem(), &[100.0]);
+    }
+
+    #[test]
+    fn native_poll_does_not_touch_slice_series() {
+        // Native runners aren't in the docker slice, so a native poll must not
+        // append a slice-memory sample.
+        let mut state = AppState::default();
+        apply_resource_update(
+            &mut state,
+            native_update(vec![resource("ltdovr", SourceKind::Native)], None),
+        );
+        assert!(state.history.slice_mem().is_empty());
+    }
+
+    #[test]
+    fn transient_empty_docker_poll_skips_slice_sample() {
+        // Containers match the prefix but stats aren't ready yet (applied, empty
+        // resources, matched_seen > 0). Recording 0 here would inject a baseline
+        // dip, so the sample is skipped.
+        let mut state = AppState::default();
+        apply_resource_update(
+            &mut state,
+            ResourceUpdate {
+                source: SourceKind::Docker,
+                resources: vec![],
+                matched_seen: 2,
+                unmatched_seen: 0,
+                error: None,
+            },
+        );
+        assert!(state.history.slice_mem().is_empty());
+    }
+
+    #[test]
+    fn genuine_zero_docker_poll_records_zero_slice_sample() {
+        // Nothing matches the prefix (matched_seen == 0): 0 is the truth, so it
+        // is recorded to keep the graph honest.
+        let mut state = AppState::default();
+        apply_resource_update(&mut state, docker_update(vec![], None));
+        assert_eq!(state.history.slice_mem(), &[0.0]);
     }
 
     #[test]
