@@ -5,8 +5,15 @@ hooks:
 	git config core.hooksPath .githooks
 	@echo "git hooks activated (core.hooksPath -> .githooks)"
 
-# One-time setup for a fresh clone.
-setup: hooks
+# Install the extra tools the hooks/CI gate call. cog lints commit messages;
+# cargo-machete audits unused deps. Local hooks fail open without them, so a
+# fresh clone needs this once to make the local gate mirror CI.
+tools:
+	cargo install cocogitto --version 7.0.0
+	cargo install cargo-machete
+
+# One-time setup for a fresh clone: gate tools + git hooks.
+setup: tools hooks
 
 install:
 	cargo build --release
@@ -29,4 +36,4 @@ screenshot:
 	rsvg-convert --zoom 2 target/pitwall.svg -o docs/pitwall.png
 	@echo "wrote docs/pitwall.png"
 
-.PHONY: hooks setup install build test screenshot
+.PHONY: hooks tools setup install build test screenshot

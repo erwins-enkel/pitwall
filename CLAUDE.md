@@ -16,14 +16,15 @@ self-correct. A human should never be pulled in to re-explain a mechanical defec
 
 ### First: activate the guardrails
 
-`core.hooksPath` is local, unversioned git config, so a fresh clone has no hooks
-until you run it once:
+`core.hooksPath` is local, unversioned git config, and the hooks call two extra
+tools (`cog`, `cargo-machete`) that a fresh clone lacks. Wire up both in one step:
 
 ```sh
-make hooks        # points git at .githooks/ (or: git config core.hooksPath .githooks)
+make setup        # = make tools + make hooks
 ```
 
-The hooks and CI use two extra tools — install them so the gate runs green locally:
+`make tools` runs the two `cargo install`s below; `make hooks` points git at
+.githooks/ (`git config core.hooksPath .githooks`). Run them by hand if you prefer:
 
 ```sh
 cargo install cargo-machete
