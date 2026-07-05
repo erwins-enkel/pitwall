@@ -591,26 +591,29 @@ fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
     // `repo` column only when polling more than one repo; then it slots between
     // `workflow › job` and `label`, shifting `branch` one rect to the right.
     let repo_w = view.multi_repo.then(|| repo_col_width(view.hosted));
-    // The section label lives in the box title now, so the first header cell
-    // shows its real column name.
-    let header_cells = if view.multi_repo {
-        vec![
-            "workflow \u{203a} job",
-            "repo",
-            "label",
-            "branch",
-            "elapsed",
-        ]
-    } else {
-        vec!["workflow \u{203a} job", "label", "branch", "elapsed"]
-    };
-    let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
     let cols = hosted_col_layout(area, repo_w);
     let job_w = cols[0].width as usize;
     // Position-independent so the index shift from the optional repo column can't
     // desync it: branch is always the second-to-last rect.
     let branch_w = cols[cols.len() - 2].width as usize;
     let repo_cell_w = repo_w.map(|_| cols[1].width as usize);
+
+    // The section label lives in the box title now, so the first header cell
+    // shows its real column name. `workflow › job` (14 cols) can exceed this flex
+    // column's Min(12) floor on a very narrow terminal, so truncate it with an
+    // ellipsis to the allocated width — the same graceful degradation as the data
+    // cells — rather than letting ratatui hard-clip it.
+    let mut header_cells = vec![Cell::from(truncate_ellipsis(
+        "workflow \u{203a} job",
+        job_w,
+    ))];
+    if view.multi_repo {
+        header_cells.push(Cell::from("repo"));
+    }
+    header_cells.push(Cell::from("label"));
+    header_cells.push(Cell::from("branch"));
+    header_cells.push(Cell::from("elapsed"));
+    let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
 
     let n = view.hosted.len();
     let shown = n.min(HOSTED_CAP);
@@ -1875,6 +1878,60 @@ mod tests {
         assert!(
             !content.contains("100h0m"),
             "full wait must not render intact past the column width"
+        );
+    }
+
+    #[test]
+    fn hosted_header_ellipsizes_on_a_narrow_terminal() {
+        // On a narrow terminal the `workflow › job` column bottoms out at its
+        // Min(12) floor, below the 14-col header. The header must truncate with
+        // an ellipsis (like the data cells) rather than hard-clip.
+        let now = SystemTime::now();
+        let hosted = vec![HostedJob {
+            repo: "o/r".into(),
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-latest".into(),
+            branch: "main".into(),
+            status: HostedStatus::InProgress,
+            since: now - std::time::Duration::from_secs(30),
+        }];
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(52, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                    multi_repo: false,
+                    deployments: &[],
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        // `workflow` only comes from the header, so its presence proves the header
+        // rendered…
+        assert!(content.contains("workflow"), "hosted header should render");
+        // …while the absence of the full 14-col label proves it was ellipsized
+        // rather than rendered intact (or hard-clipped mid-word without a marker).
+        assert!(
+            !content.contains("workflow \u{203a} job"),
+            "narrow header must truncate, not render the full 14-col label"
+        );
+        assert!(
+            content.contains('\u{2026}'),
+            "truncation ellipsis should appear"
         );
     }
 
