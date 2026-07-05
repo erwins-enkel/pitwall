@@ -842,33 +842,53 @@ mod tests {
         assert_eq!(lerp_color(Color::Reset, Color::Red, 0.5), Color::Red);
     }
 
-    /// Extracts the single `fg` color of a one-cell (`width = 1`, one sample)
-    /// spark_line — used to probe `color_of` outputs in isolation.
-    fn solo_cell_fg(
-        v: f64,
-        height_max: f64,
-        p: &Palette,
-        color_of: impl Fn(f64) -> Color,
-    ) -> Color {
-        let line = spark_line(&[v], height_max, 1, p, false, color_of);
-        assert_eq!(line.spans.len(), 1);
-        line.spans[0].style.fg.expect("colored cell should set fg")
-    }
-
     #[test]
     fn multi_core_cpu_color_is_window_relative_not_absolute() {
-        // cpu_pct is Docker's per-core convention (100% = one core); a multi-core
-        // runner reading 400% must not read as solid-red on an absolute /100
-        // scale. Window-relative color (cpu_max = the window's own max, here
-        // 400) keeps a low reading near busy while the peak alone earns
-        // near_cap.
+        // Drives the REAL render path (render -> render_table -> table_row),
+        // not a reimplemented gradient closure, so a regression that swaps the
+        // real call site's window-relative `v / cpu_max` scale for an absolute
+        // `v / 100` scale would actually fail this test.
+        //
+        // cpu_pct is Docker's per-core convention (100% = one core), so a
+        // multi-core runner's history can read 200-400%. Under the intended
+        // window-relative scale (cpu_max = the window's own max, 400 here),
+        // fracs are 0.5..1.0: the ramp passes through `warn` (yellow) before
+        // topping out at `near_cap` (red) — so BOTH colors must appear. Under a
+        // buggy absolute `/100` scale every frac would be >= 2.0 and clamp
+        // straight to `near_cap`, painting the whole sparkline solid red with
+        // NO yellow at all. So `has_fg(term, p.warn)` is the discriminator:
+        // it only passes under the correct, window-relative scale.
         let p = Palette::for_flavor(Flavor::Mocha);
-        let cpu_max = 400.0_f64;
-        let high_fg = solo_cell_fg(400.0, cpu_max, &p, |v| gradient(v / cpu_max, 0.0, 1.0, &p));
-        let low_fg = solo_cell_fg(40.0, cpu_max, &p, |v| gradient(v / cpu_max, 0.0, 1.0, &p));
-        assert_eq!(high_fg, p.near_cap);
-        assert_ne!(low_fg, p.near_cap);
-        assert_ne!(low_fg, p.warn);
+        let rows = vec![RunnerRow {
+            name: "ci-runner-1".into(),
+            cpu_pct: 400.0,
+            // Well under the warn band (warn_ratio 0.85 in `draw`) and
+            // `mem_level` explicitly Normal, so the mem cell can't itself
+            // paint `warn` — the only possible source of yellow in this
+            // frame is the CPU sparkline.
+            mem_bytes: 47 * 1024 * 1024,
+            mem_limit: 8 * 1024 * 1024 * 1024,
+            job: Some(crate::model::JobInfo {
+                workflow: "CI".into(),
+                job: "test".into(),
+                branch: "main".into(),
+                started_at: SystemTime::now(),
+            }),
+            load: Load::Busy, // busy row's own text/style is green, not yellow/red
+            mem_level: MemLevel::Normal,
+            kind: SourceKind::Docker,
+            cpu_hist: vec![200.0, 250.0, 300.0, 350.0, 400.0], // window max 400
+            mem_hist: vec![],
+        }];
+        let term = draw(&rows, 24 * 1024 * 1024 * 1024);
+        assert!(
+            has_fg(&term, p.warn),
+            "window-relative CPU scale must ramp through warn (yellow) before near_cap"
+        );
+        assert!(
+            has_fg(&term, p.near_cap),
+            "the window's peak sample must still reach near_cap (red)"
+        );
     }
 
     /// Renders a plain (non-gradient) spark_line for right-alignment /
