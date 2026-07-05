@@ -34,17 +34,24 @@ pub struct NativeRunner {
     pub key: Option<RunnerKey>,
 }
 
-/// Build the jobs poll-lists from the pulse repo + discovered native scopes.
-/// `repos` = order-preserving dedup of `[pulse_repo]` + native repo-scopes (so
-/// an overlapping repo isn't polled twice); `orgs` = distinct native org-scopes.
-pub fn derive_scopes(pulse_repo: &str, runners: &[NativeRunner]) -> (Vec<String>, Vec<String>) {
-    let mut repos = vec![pulse_repo.to_string()];
+/// Build the jobs poll-lists from the configured repos + discovered native
+/// scopes. `repos` = order-preserving dedup of configured repos + native
+/// repo-scopes (so an overlapping repo isn't polled twice); `orgs` = distinct
+/// native org-scopes.
+pub fn derive_scopes(
+    configured: &[String],
+    runners: &[NativeRunner],
+) -> (Vec<String>, Vec<String>) {
+    let mut repos: Vec<String> = Vec::new();
     let mut orgs: Vec<String> = Vec::new();
     let push_unique = |v: &mut Vec<String>, s: &str| {
         if !v.iter().any(|e| e == s) {
             v.push(s.to_string());
         }
     };
+    for c in configured {
+        push_unique(&mut repos, c);
+    }
     for r in runners {
         match &r.scope {
             Some(Scope::Repo(s)) => push_unique(&mut repos, s),
@@ -576,9 +583,16 @@ mod tests {
             // Resource-only (no scope) contributes nothing.
             build_runner("actions.runner.blind.host.service", "/cg".into(), None).unwrap(),
         ];
-        let (repos, orgs) = derive_scopes("erwins-enkel/pulse", &runners);
+        let (repos, orgs) = derive_scopes(&["erwins-enkel/pulse".to_string()], &runners);
         assert_eq!(repos, vec!["erwins-enkel/pulse", "scoop/vanscout"]);
         assert_eq!(orgs, vec!["ltdovr"]);
+    }
+
+    #[test]
+    fn derive_scopes_seeds_from_multiple_configured_repos() {
+        let (repos, orgs) = derive_scopes(&["a/b".to_string(), "c/d".to_string()], &[]);
+        assert_eq!(repos, vec!["a/b", "c/d"]);
+        assert!(orgs.is_empty());
     }
 
     #[test]

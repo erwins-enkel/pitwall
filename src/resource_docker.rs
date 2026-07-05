@@ -60,7 +60,15 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>) {
             }
         }
         let d = docker.as_ref().unwrap();
-        match collect(d, &cfg.repo, &cfg.prefix, &mut prev).await {
+        // Docker-collected runners are tagged with the first configured repo, same
+        // as the pre-multi-repo single-`repo` behavior. Scoping Docker containers
+        // to a specific one of several configured repos is out of scope here.
+        let scope_repo = cfg
+            .configured_repos
+            .first()
+            .map(String::as_str)
+            .unwrap_or("");
+        match collect(d, scope_repo, &cfg.prefix, &mut prev).await {
             Ok((resources, matched_seen, unmatched_seen)) => {
                 let _ = tx
                     .send(ResourceUpdate {

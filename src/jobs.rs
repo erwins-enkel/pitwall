@@ -1,4 +1,4 @@
-use crate::config::{Config, DEFAULT_REPO};
+use crate::config::Config;
 use crate::model::{sort_hosted, HostedJob, HostedStatus, JobInfo, RunnerKey};
 use futures_util::{stream, StreamExt};
 use std::collections::HashMap;
@@ -295,18 +295,8 @@ async fn poll_scope(scope: String, kind: ScopeKind) -> (String, ScopeOutcome) {
 pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
     let mut prev: HashMap<String, ScopeState> = HashMap::new();
     loop {
-        // The unset-PITWALL_REPO sentinel can't be polled; skip it. Native
-        // runners bring their own real scopes, so it's just excluded, not fatal.
-        let real_repos: Vec<String> = cfg
-            .repos
-            .iter()
-            .filter(|r| r.as_str() != DEFAULT_REPO)
-            .cloned()
-            .collect();
-
-        if real_repos.is_empty() && cfg.orgs.is_empty() {
-            // Nothing pollable: the only repo is the unset sentinel and there are
-            // no native scopes. Surface the config hint instead of polling gh.
+        if cfg.repos.is_empty() && cfg.orgs.is_empty() {
+            // No configured repos and no native scopes → nothing pollable.
             let _ = tx
                 .send(JobsUpdate {
                     jobs: Slice::new(),
@@ -321,7 +311,9 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
             continue;
         }
 
-        let repo_futs = real_repos
+        let repo_futs = cfg
+            .repos
+            .clone()
             .into_iter()
             .map(|scope| poll_scope(scope, ScopeKind::Repo));
         let org_futs = cfg

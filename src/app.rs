@@ -57,7 +57,7 @@ pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> any
 
     // Discover native runners once; derive the jobs poll-lists from their scopes.
     let natives = discover();
-    let (repos, orgs) = resource_native::derive_scopes(&cfg.repo, &natives);
+    let (repos, orgs) = resource_native::derive_scopes(&cfg.configured_repos, &natives);
     cfg.repos = repos;
     cfg.orgs = orgs;
 
