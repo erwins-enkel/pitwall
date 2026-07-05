@@ -60,11 +60,28 @@ and elapsed (running) or wait time (`queued 8s`, from the job's creation).
 
 ## Install
 
+### Prebuilt binary
+
+Download a static Linux binary from the [latest release](https://github.com/erwins-enkel/pitwall/releases/latest). Two targets are published, each with a matching `.sha256` checksum:
+
+- `pitwall-x86_64-unknown-linux-musl.tar.gz`
+- `pitwall-aarch64-unknown-linux-musl.tar.gz`
+
+```sh
+curl -sSLO https://github.com/erwins-enkel/pitwall/releases/latest/download/pitwall-x86_64-unknown-linux-musl.tar.gz
+tar xzf pitwall-x86_64-unknown-linux-musl.tar.gz
+install -Dm755 pitwall ~/.local/bin/pitwall
+```
+
+The binaries are statically linked (musl), so they run on any Linux distribution. Make sure `~/.local/bin` is on your `PATH`.
+
+### Build from source
+
 ```sh
 make install
 ```
 
-Builds a release binary and installs it to `~/.local/bin/pitwall`. Make sure `~/.local/bin` is on your `PATH`.
+Builds a release binary and installs it to `~/.local/bin/pitwall`.
 
 Manual alternative:
 
