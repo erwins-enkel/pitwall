@@ -403,6 +403,7 @@ mod tests {
             &mut state,
             JobsUpdate {
                 jobs: fresh,
+                hosted: Vec::new(),
                 error: None,
             },
         );
