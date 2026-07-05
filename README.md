@@ -10,19 +10,19 @@ btop-like terminal UI for self-hosted GitHub Actions runners: live CPU/mem per r
 
 A table, one row per runner (docker runners first, then native):
 
-| runner | cpu | ~cpu | mem | ~mem | workflow › job | elapsed |
+| name | cpu | ~cpu | mem | ~mem | workflow › job | elapsed |
 |---|---|---|---|---|---|---|
 
-- **runner** — docker container name (e.g. `ci-runner-1`) or, for native runners, the systemd unit's registration segment (e.g. `ltdovr`, `scoop-vanscout`).
+- **name** — docker container name (e.g. `ci-runner-1`) or, for native runners, the systemd unit's registration segment (e.g. `ltdovr`, `scoop-vanscout`).
 - **cpu / mem** — live usage. Docker: from the rootless docker socket. Native: from the systemd unit's cgroup v2 stats. Memory is the working set (`inactive_file` subtracted) on both, shown as `used/limit`, or just `used` for uncapped native runners.
-- **~cpu / ~mem** — block-char sparklines of the last ~40s (20 samples at the 2s
+- **~cpu / ~mem** — braille gradient sparklines of the last ~40s (20 samples at the 2s
   poll). CPU auto-scales to its window max with a 10% floor, so idle jitter reads
   as a flat baseline; mem scales to the limit (flat for uncapped native runners).
   History is in-memory and resets on restart.
 - **workflow › job** — `— idle` when no in-progress job is joined, `busy` when a runner is busy but no per-job detail is available (org-scoped runners; see below), else `Workflow Name › Job Name`.
 - **elapsed** — ticking duration since the job started; `-` when idle.
 
-Rows are colored by load using the Catppuccin palette over a full Catppuccin background: muted gray = idle, green = busy, red = near-cap (mem ≥ crit % of a finite limit — the whole row goes red). As an early warning *below* near-cap, the `mem` cell alone turns the warn color (yellow) while its memory is in the warn band (≥ warn %, < crit %), so a busy runner stays green with just a yellow mem cell. Native runners are uncapped, so they never enter the warn/near-cap tiers. The gauge at the bottom shows summed **docker** runner memory against a configurable slice cap, using the same thresholds: teal normally, yellow (` ⚠ warn`) in the warn band, red (` ⚠ NEAR CAP`) at the cap; native runners live in a different slice and don't count toward it. Pick a flavor with `PITWALL_THEME` (see [Configuration](#configuration)). Colors assume a truecolor terminal; on 16/256-color terminals they downsample to the nearest available color.
+Rows are colored by load using the Catppuccin palette over a full Catppuccin background: muted gray = idle, green = busy, red = near-cap (mem ≥ crit % of a finite limit — the whole row goes red). As an early warning *below* near-cap, the `mem` cell alone turns the warn color (yellow) while its memory is in the warn band (≥ warn %, < crit %), so a busy runner stays green with just a yellow mem cell. Native runners are uncapped, so they never enter the warn/near-cap tiers. The braille sparkline at the bottom shows summed **docker** runner memory against a configurable slice cap; its numeric label follows the same tiers as the `mem` cell: normal text, yellow (` ⚠ warn`) in the warn band, red (` ⚠ NEAR CAP`) at the cap. Native runners live in a different slice and don't count toward it. Pick a flavor with `PITWALL_THEME` (see [Configuration](#configuration)). Colors assume a truecolor terminal; on 16/256-color terminals they downsample to the nearest available color.
 
 ## Native runners
 
@@ -131,8 +131,8 @@ config file → built-in default**.
 | prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` (must match your runner container names, e.g. `myorg-ci-runner-`) |
 | slice cap (GiB) | `PITWALL_SLICE_CAP_GIB` | `slice_cap_gib` | `24` |
 | theme | `PITWALL_THEME` | `theme` | `mocha` — Catppuccin flavor: `mocha`, `macchiato`, `frappe`, or `latte` (light). Unknown values fall back to `mocha`. |
-| mem warn % | `PITWALL_MEM_WARN_PCT` | — | `85` (warn tier: yellow mem cell / gauge) |
-| mem crit % | `PITWALL_MEM_CRIT_PCT` | — | `90` (critical tier: red row / gauge) |
+| mem warn % | `PITWALL_MEM_WARN_PCT` | — | `85` (warn tier: yellow mem cell + memory sparkline label) |
+| mem crit % | `PITWALL_MEM_CRIT_PCT` | — | `90` (critical tier: red row + memory sparkline label) |
 
 An empty env var (e.g. `PITWALL_REPO=`) is treated as unset, falling through to
 the file value, then the default.
