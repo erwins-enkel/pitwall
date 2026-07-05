@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::history::History;
 use crate::jobs::{self, JobsUpdate};
-use crate::model::{join, JobInfo, RunnerKey, RunnerResource, SourceKind};
+use crate::model::{join, HostedJob, JobInfo, RunnerKey, RunnerResource, SourceKind};
 use crate::resource::ResourceUpdate;
 use crate::resource_native::discover;
 use crate::theme::Palette;
@@ -22,6 +22,7 @@ struct AppState {
     native_err: Option<String>,
     jobs: HashMap<RunnerKey, Option<JobInfo>>,
     jobs_err: Option<String>,
+    hosted: Vec<HostedJob>,
     history: History,
     /// From the last successful docker poll: containers whose name matched the
     /// prefix, and those that didn't. Drives the empty-state hint (a docker-only
@@ -163,6 +164,7 @@ fn apply_resource_update(state: &mut AppState, update: ResourceUpdate) {
 fn apply_jobs_update(state: &mut AppState, update: JobsUpdate) {
     state.jobs_err = update.error;
     state.jobs = update.jobs;
+    state.hosted = update.hosted;
 }
 
 fn is_quit(key: &KeyEvent) -> bool {
@@ -210,6 +212,7 @@ fn draw(
                 unmatched_seen: state.unmatched_seen,
                 warn_ratio,
                 crit_ratio,
+                hosted: &state.hosted,
             },
         );
     })?;
@@ -219,6 +222,7 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::HostedStatus;
 
     fn resource(name: &str, kind: SourceKind) -> RunnerResource {
         RunnerResource {
@@ -414,5 +418,28 @@ mod tests {
             name: "runner-2".into()
         }));
         assert!(state.jobs_err.is_none());
+    }
+
+    #[test]
+    fn jobs_update_sets_hosted() {
+        let mut state = AppState::default();
+        let hosted = vec![HostedJob {
+            workflow: "CI".into(),
+            job: "Build".into(),
+            label: "ubuntu-latest".into(),
+            branch: "main".into(),
+            status: HostedStatus::InProgress,
+            since: SystemTime::now(),
+        }];
+        apply_jobs_update(
+            &mut state,
+            JobsUpdate {
+                jobs: HashMap::new(),
+                hosted,
+                error: None,
+            },
+        );
+        assert_eq!(state.hosted.len(), 1);
+        assert_eq!(state.hosted[0].job, "Build");
     }
 }

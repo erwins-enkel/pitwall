@@ -1,4 +1,6 @@
-use crate::model::{elapsed_secs, mem_level, slice_total_bytes, Load, MemLevel, RunnerRow};
+use crate::model::{
+    elapsed_secs, mem_level, slice_total_bytes, HostedJob, HostedStatus, Load, MemLevel, RunnerRow,
+};
 use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -35,6 +37,9 @@ pub struct View<'a> {
     pub unmatched_seen: usize,
     pub warn_ratio: f64,
     pub crit_ratio: f64,
+    /// Hosted (GitHub-hosted) jobs — running + queued — shown in their own
+    /// section below the runner table. Empty ⇒ section hidden.
+    pub hosted: &'a [HostedJob],
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -55,6 +60,31 @@ pub fn fmt_elapsed(secs: u64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+/// Max hosted rows rendered before collapsing the rest into a `+N more` line.
+const HOSTED_CAP: usize = 6;
+
+/// Vertical cells the hosted section needs for `n` jobs: 0 when empty, else a
+/// header row + up to `HOSTED_CAP` job rows + one overflow line when truncated.
+fn hosted_height(n: usize) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    let shown = n.min(HOSTED_CAP) as u16;
+    let overflow = if n > HOSTED_CAP { 1 } else { 0 };
+    1 + shown + overflow
+}
+
+/// Compact wait/elapsed for queued jobs: `8s`, `2m`, `1h2m`.
+fn fmt_wait(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -335,6 +365,89 @@ fn render_empty_state(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(paragraph, chunks[1]);
 }
 
+const HOSTED_LABEL_W: u16 = 14;
+const HOSTED_ELAPSED_W: u16 = 12;
+
+/// Column rects for the hosted table: `workflow › job` (flex), `label`,
+/// `branch`, `elapsed` — mirrors `column_layout`'s read-back approach so the
+/// flexing cells are truncated to exactly what ratatui allocates.
+fn hosted_col_layout(area: Rect) -> [Rect; 4] {
+    Layout::horizontal([
+        Constraint::Min(12),
+        Constraint::Length(HOSTED_LABEL_W),
+        Constraint::Min(8),
+        Constraint::Length(HOSTED_ELAPSED_W),
+    ])
+    .flex(Flex::Start)
+    .spacing(COL_SPACING)
+    .areas(area)
+}
+
+fn hosted_row(
+    j: &HostedJob,
+    now: SystemTime,
+    p: &Palette,
+    job_w: usize,
+    branch_w: usize,
+) -> Row<'static> {
+    let (glyph, color) = match j.status {
+        HostedStatus::InProgress => ('\u{25cf}', p.busy), // ●
+        HostedStatus::Queued => ('\u{25cb}', p.warn),     // ○
+    };
+    let wj = format!("{} {} \u{203a} {}", glyph, j.workflow, j.job);
+    let branch = if j.branch.is_empty() {
+        "-".to_string()
+    } else {
+        j.branch.clone()
+    };
+    let elapsed = match j.status {
+        HostedStatus::InProgress => fmt_elapsed(elapsed_secs(j.since, now)),
+        HostedStatus::Queued => format!("queued {}", fmt_wait(elapsed_secs(j.since, now))),
+    };
+    Row::new(vec![
+        Cell::from(truncate_ellipsis(&wj, job_w)),
+        Cell::from(truncate_ellipsis(&j.label, HOSTED_LABEL_W as usize)),
+        Cell::from(truncate_ellipsis(&branch, branch_w)),
+        Cell::from(elapsed),
+    ])
+    .style(Style::new().fg(color).bg(p.base))
+}
+
+fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
+    let p = view.palette;
+    let header = Row::new(vec!["hosted", "label", "branch", "elapsed"])
+        .style(Style::new().fg(p.text).bg(p.base).bold());
+    let cols = hosted_col_layout(area);
+    let job_w = cols[0].width as usize;
+    let branch_w = cols[2].width as usize;
+
+    let n = view.hosted.len();
+    let shown = n.min(HOSTED_CAP);
+    let mut rows: Vec<Row> = view.hosted[..shown]
+        .iter()
+        .map(|j| hosted_row(j, view.now, p, job_w, branch_w))
+        .collect();
+    if n > HOSTED_CAP {
+        rows.push(
+            Row::new(vec![Cell::from(format!("+{} more", n - HOSTED_CAP))])
+                .style(Style::new().fg(p.idle).bg(p.base)),
+        );
+    }
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(HOSTED_LABEL_W),
+            Constraint::Min(8),
+            Constraint::Length(HOSTED_ELAPSED_W),
+        ],
+    )
+    .header(header)
+    .column_spacing(COL_SPACING)
+    .style(Style::new().fg(p.text).bg(p.base));
+    frame.render_widget(table, area);
+}
+
 fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
     let total = slice_total_bytes(view.rows);
     let ratio = if view.slice_cap_bytes > 0 {
@@ -376,11 +489,15 @@ pub fn render(frame: &mut Frame, view: &View) {
     );
 
     let has_banner = view.status.is_some();
+    let hosted_h = hosted_height(view.hosted.len());
     let mut constraints = vec![Constraint::Length(1)];
     if has_banner {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(1));
+    if hosted_h > 0 {
+        constraints.push(Constraint::Length(hosted_h));
+    }
     constraints.push(Constraint::Length(1));
     let chunks = Layout::vertical(constraints).split(frame.area());
 
@@ -406,6 +523,11 @@ pub fn render(frame: &mut Frame, view: &View) {
         render_empty_state(frame, body_area, view);
     } else {
         render_table(frame, body_area, view);
+    }
+
+    if hosted_h > 0 {
+        render_hosted(frame, chunks[idx], view);
+        idx += 1;
     }
 
     let gauge_area = chunks[idx];
@@ -458,6 +580,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -663,6 +786,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -814,6 +938,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -874,6 +999,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -917,6 +1043,7 @@ mod tests {
                         unmatched_seen: 0,
                         warn_ratio: 0.85,
                         crit_ratio: 0.90,
+                        hosted: &[],
                     },
                 );
             })
@@ -947,6 +1074,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -1060,6 +1188,7 @@ mod tests {
                     unmatched_seen: 6,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -1073,6 +1202,22 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("6 containers running"));
         assert!(content.contains("ci-runner-"));
+    }
+
+    #[test]
+    fn hosted_height_is_zero_when_empty_and_caps_with_overflow() {
+        assert_eq!(hosted_height(0), 0);
+        assert_eq!(hosted_height(3), 1 + 3); // header + 3 rows
+        assert_eq!(hosted_height(HOSTED_CAP), 1 + HOSTED_CAP as u16);
+        // over cap → header + CAP rows + one "+N more" line
+        assert_eq!(hosted_height(HOSTED_CAP + 5), 1 + HOSTED_CAP as u16 + 1);
+    }
+
+    #[test]
+    fn fmt_wait_compact_units() {
+        assert_eq!(fmt_wait(8), "8s");
+        assert_eq!(fmt_wait(125), "2m");
+        assert_eq!(fmt_wait(3720), "1h2m");
     }
 
     #[test]
@@ -1095,6 +1240,7 @@ mod tests {
                     unmatched_seen: 2,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
