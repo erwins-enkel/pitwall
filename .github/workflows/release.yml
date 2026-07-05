@@ -18,7 +18,11 @@ concurrency:
 
 jobs:
   release-please:
-    # Only the push-to-main path maintains the release PR / cuts releases.
+    # Only CUTS releases here — opening the next release PR is deferred to the
+    # open-release-pr job below. Draft-first releases have no git tag until the
+    # publish job runs, and release-please derives the next PR's changelog from
+    # the last tag; opening the PR in this same run (skip-github-pull-request:
+    # false) would compute it against a missing tag and dump the full history.
     # A workflow_dispatch is a build-only re-run and must skip this job.
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -37,6 +41,7 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
 
   # Resolve the tag + commit to build, for both the release and the manual-rebuild
   # paths. A draft release has no git tag ref yet, so we build from the release's
@@ -124,18 +129,20 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release edit "$TAG" --draft=false
 
-  # Reconcile the release-please state now that the git tag exists.
+  # Opens/updates the next release PR — the half of release-please that the
+  # release-please job skips. Running it here guarantees the git tag already
+  # exists before the PR's changelog is computed, so it is always bounded to the
+  # genuinely unreleased commits (never the full history).
   #
-  # Draft-first releases have no git tag until `publish` above flips the draft
-  # (minutes after the initial release-please run). In that window release-please
-  # has already opened the *next* release PR, but — unable to see the not-yet-created
-  # tag — it regenerates the changelog from the full history instead of just the
-  # unreleased commits. Re-running release-please here, after the tag exists, makes
-  # it recompute against the real release boundary: it corrects or closes that
-  # stray PR. It never re-cuts this release (HEAD is already tagged as released).
-  reconcile-release-pr:
+  # Runs on every push, but the gate below waits for `publish` whenever a release
+  # was just cut, so the tag exists first:
+  #   - no release cut (release_created != 'true') → publish is skipped, run now;
+  #   - release cut + publish succeeded → tag exists, run;
+  #   - release cut + publish failed → tag missing, skip (a workflow_dispatch
+  #     rebuild republishes; the PR then opens on the next push).
+  open-release-pr:
     needs: [release-please, publish]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.release-please.result == 'success' && (needs.release-please.outputs.release_created != 'true' || needs.publish.result == 'success') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -145,3 +152,4 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-release: true
