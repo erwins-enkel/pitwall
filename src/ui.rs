@@ -190,14 +190,17 @@ fn spark_line(
                 s.push(braille_glyph(hl, hr));
             }
         }
-        let span = Span::styled(
-            s,
-            Style::new()
-                .fg(p.idle)
-                .bg(p.base)
-                .add_modifier(Modifier::DIM),
-        );
-        return Line::from(vec![span]);
+        // Mirror load_style: DIM sharpens idle rows on a dark base but washes
+        // them out on a light one, so light flavors (Latte) skip it and rely on
+        // the idle color alone — keeping the sparkline consistent with the rest
+        // of the idle row.
+        let style = Style::new().fg(p.idle).bg(p.base);
+        let style = if p.is_light {
+            style
+        } else {
+            style.add_modifier(Modifier::DIM)
+        };
+        return Line::from(vec![Span::styled(s, style)]);
     }
 
     let mut spans = Vec::with_capacity(width);
@@ -938,13 +941,21 @@ mod tests {
     }
 
     #[test]
-    fn idle_spark_line_is_one_dim_span() {
-        let p = Palette::for_flavor(Flavor::Mocha);
-        let line = spark_line(&[10.0, 20.0, 100.0], 100.0, 5, &p, true, |_| p.busy);
+    fn idle_spark_line_is_one_flat_idle_span() {
+        // Dark flavor: single flat idle span WITH DIM.
+        let dark = Palette::for_flavor(Flavor::Mocha);
+        let line = spark_line(&[10.0, 20.0, 100.0], 100.0, 5, &dark, true, |_| dark.busy);
         assert_eq!(line.spans.len(), 1);
-        let span = &line.spans[0];
-        assert_eq!(span.style.fg, Some(p.idle));
-        assert!(span.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(line.spans[0].style.fg, Some(dark.idle));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+
+        // Light flavor (Latte): same flat idle span but NO DIM, mirroring
+        // load_style so the sparkline stays consistent with the idle row.
+        let light = Palette::for_flavor(Flavor::Latte);
+        let line = spark_line(&[10.0, 20.0, 100.0], 100.0, 5, &light, true, |_| light.busy);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style.fg, Some(light.idle));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
