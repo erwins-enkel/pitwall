@@ -1,5 +1,5 @@
 use crate::config::{Config, DEFAULT_REPO};
-use crate::model::{JobInfo, RunnerKey};
+use crate::model::{HostedJob, HostedStatus, JobInfo, RunnerKey};
 use futures_util::{stream, StreamExt};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -76,6 +76,67 @@ pub fn parse_jobs(workflow: &str, branch: &str, json: &str) -> Vec<(String, JobI
                             started_at: started,
                         },
                     ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True if a GitHub job's `labels` array marks it self-hosted. GitHub auto-adds
+/// the `self-hosted` label to every self-hosted runner job; hosted jobs never
+/// carry it. A missing/!array `labels` is treated as not-self-hosted (hosted).
+fn is_self_hosted(labels: &serde_json::Value) -> bool {
+    labels
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|l| l.as_str() == Some("self-hosted")))
+}
+
+/// Hosted (non-self-hosted) jobs in status `in_progress`/`queued` from a run's
+/// jobs payload. `since` is `started_at` for running jobs, `created_at` for
+/// queued. `label` is the first requested label (e.g. `ubuntu-latest`).
+pub fn parse_hosted_jobs(workflow: &str, branch: &str, json: &str) -> Vec<HostedJob> {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    v.get("jobs")
+        .and_then(|j| j.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|j| {
+                    let status = match j.get("status").and_then(|s| s.as_str())? {
+                        "in_progress" => HostedStatus::InProgress,
+                        "queued" => HostedStatus::Queued,
+                        _ => return None,
+                    };
+                    let labels = j.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+                    if is_self_hosted(&labels) {
+                        return None;
+                    }
+                    let job = j.get("name")?.as_str()?.to_string();
+                    let label = labels
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("hosted")
+                        .to_string();
+                    let ts_key = match status {
+                        HostedStatus::InProgress => "started_at",
+                        HostedStatus::Queued => "created_at",
+                    };
+                    let since = j
+                        .get(ts_key)
+                        .and_then(|s| s.as_str())
+                        .map(parse_rfc3339)
+                        .unwrap_or_else(SystemTime::now);
+                    Some(HostedJob {
+                        workflow: workflow.to_string(),
+                        job,
+                        label,
+                        branch: branch.to_string(),
+                        status,
+                        since,
+                    })
                 })
                 .collect()
         })
@@ -268,6 +329,7 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::HostedStatus;
 
     fn slice_with(scope: &str, name: &str) -> Slice {
         let mut s = Slice::new();
@@ -397,5 +459,30 @@ mod tests {
         prev.insert("ltdovr".to_string(), org_slice);
         let flat = flatten(&prev);
         assert_eq!(flat.len(), 2);
+    }
+
+    #[test]
+    fn parse_hosted_jobs_keeps_hosted_running_and_queued_only() {
+        let out = parse_hosted_jobs(
+            "CI",
+            "main",
+            include_str!("../tests/fixtures/hosted_jobs.json"),
+        );
+        // self-hosted (E2E Tests) excluded; completed (Old Job) excluded.
+        assert_eq!(out.len(), 2);
+
+        let build = out.iter().find(|h| h.job == "Build").unwrap();
+        assert_eq!(build.workflow, "CI");
+        assert_eq!(build.branch, "main");
+        assert_eq!(build.label, "ubuntu-latest");
+        assert_eq!(build.status, HostedStatus::InProgress);
+        // running → since == started_at (12:26:00Z)
+        assert_eq!(build.since, parse_rfc3339("2026-07-04T12:26:00Z"));
+
+        let lint = out.iter().find(|h| h.job == "Lint").unwrap();
+        assert_eq!(lint.label, "ubuntu-24.04");
+        assert_eq!(lint.status, HostedStatus::Queued);
+        // queued → since == created_at (12:26:30Z)
+        assert_eq!(lint.since, parse_rfc3339("2026-07-04T12:26:30Z"));
     }
 }
