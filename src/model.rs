@@ -81,6 +81,46 @@ pub fn sort_hosted(jobs: &mut [HostedJob], now: SystemTime) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeployStatus {
+    Building,
+    Queued,
+}
+
+/// A single in-flight Vercel deployment shown in the vercel section. `started_at`
+/// is the build start for `Building` and the creation time for `Queued`, so
+/// `elapsed_secs(started_at, now)` yields build-elapsed or queue-wait respectively.
+#[derive(Debug, Clone)]
+pub struct Deployment {
+    /// The source `owner/repo` (from Vercel's `meta.githubOrg`/`meta.githubRepo`).
+    /// Shown in the vercel section only when more than one repo is polled, to
+    /// disambiguate across repos.
+    pub repo: String,
+    pub project: String,
+    pub target: String,
+    pub branch: String,
+    pub commit_summary: String,
+    pub status: DeployStatus,
+    pub started_at: SystemTime,
+}
+
+fn deploy_status_order(s: DeployStatus) -> u8 {
+    match s {
+        DeployStatus::Building => 0,
+        DeployStatus::Queued => 1,
+    }
+}
+
+/// Sort building deployments before queued, and within each group longest-first
+/// (largest elapsed/wait). Stable ordering for the vercel section.
+pub fn sort_deployments(deps: &mut [Deployment], now: SystemTime) {
+    deps.sort_by(|a, b| {
+        deploy_status_order(a.status)
+            .cmp(&deploy_status_order(b.status))
+            .then_with(|| elapsed_secs(b.started_at, now).cmp(&elapsed_secs(a.started_at, now)))
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Load {
     Idle,
     Busy,
@@ -536,5 +576,31 @@ mod tests {
         let order: Vec<&str> = v.iter().map(|h| h.job.as_str()).collect();
         // running first (longest elapsed first), then queued (longest wait first)
         assert_eq!(order, vec!["run-old", "run-new", "q-old", "q-new"]);
+    }
+
+    #[test]
+    fn sort_deployments_building_first_then_longest_first() {
+        let now = SystemTime::now();
+        fn d(project: &str, status: DeployStatus, ago: u64, now: SystemTime) -> Deployment {
+            Deployment {
+                repo: "o/r".into(),
+                project: project.into(),
+                target: "preview".into(),
+                branch: "main".into(),
+                commit_summary: "fix: thing".into(),
+                status,
+                started_at: now - Duration::from_secs(ago),
+            }
+        }
+        let mut v = vec![
+            d("q-new", DeployStatus::Queued, 5, now),
+            d("build-new", DeployStatus::Building, 10, now),
+            d("q-old", DeployStatus::Queued, 90, now),
+            d("build-old", DeployStatus::Building, 120, now),
+        ];
+        sort_deployments(&mut v, now);
+        let order: Vec<&str> = v.iter().map(|d| d.project.as_str()).collect();
+        // building first (longest elapsed first), then queued (longest wait first)
+        assert_eq!(order, vec!["build-old", "build-new", "q-old", "q-new"]);
     }
 }
