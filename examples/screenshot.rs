@@ -72,6 +72,9 @@ fn main() {
                 // Single-repo demo: the hosted `repo` column stays hidden, so the
                 // committed screenshot is unchanged.
                 multi_repo: false,
+                // No Vercel deployments in the demo → the section stays hidden,
+                // so the committed screenshot is unchanged.
+                deployments: &[],
             },
         );
     })
