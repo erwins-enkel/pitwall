@@ -1,0 +1,5 @@
+# Cocogitto configuration — commit-message linting only.
+# Versioning and changelog are owned by release-please (see .github/workflows/
+# release.yml), not cocogitto. cog is used here purely to enforce the
+# Conventional Commits format via the commit-msg hook and the CI `commits` job.
+ignore_merge_commits = true

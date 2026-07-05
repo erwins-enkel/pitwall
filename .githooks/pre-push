@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# CI mirror — keep in sync with .github/workflows/ci.yml so pushes never learn
+# what broke from a red CI round-trip.
+set -euo pipefail
+
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+
+# Probe via `cargo machete` itself so it's found in ~/.cargo/bin even when that
+# dir isn't on PATH (cargo resolves its own subcommands there).
+if cargo machete --help >/dev/null 2>&1; then
+  cargo machete
+else
+  echo "pre-push: cargo-machete not found — skipping unused-deps audit (CI enforces it)." >&2
+  echo "          install with: cargo install cargo-machete" >&2
+fi
