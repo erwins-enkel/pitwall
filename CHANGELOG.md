@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.3.0...pitwall-v0.3.1) (2026-07-05)
+
+
+### Bug Fixes
+
+* **release:** reconcile release-please after publish ([#43](https://github.com/erwins-enkel/pitwall/issues/43)) ([141d380](https://github.com/erwins-enkel/pitwall/commit/141d380775c80a15cf15592dc8959e4590641ef2))
+* **release:** split release-please across the tag boundary ([#45](https://github.com/erwins-enkel/pitwall/issues/45)) ([09cb94e](https://github.com/erwins-enkel/pitwall/commit/09cb94e2295a34774fbb91bb7dedc1792f586501))
+
 ## [0.3.0](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.2.0...pitwall-v0.3.0) (2026-07-05)
 
 
