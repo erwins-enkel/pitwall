@@ -56,8 +56,8 @@ and elapsed (running) or wait time (`queued 8s`, from the job's creation).
 
 Below the hosted section, pitwall lists **in-flight Vercel builds** for the
 configured repos — both building and queued — hidden entirely when nothing is
-building. Columns: `project`, `target`, `branch`, and elapsed (building) or
-wait time (`queued 8s`, from the deployment's creation).
+building. Columns: `project`, `target`, `branch`, the commit summary, and
+elapsed (building) or wait time (`queued 8s`, from the deployment's creation).
 
 - `●` a building deployment; `○` a queued one (waiting for a build slot).
 - Data source: shells out to the `vercel` CLI (`vercel list --format json

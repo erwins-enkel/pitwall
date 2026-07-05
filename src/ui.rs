@@ -524,7 +524,7 @@ fn deploy_repo_col_width(deps: &[Deployment]) -> u16 {
 
 /// Column constraints for the vercel table: `vercel` project (flex), an
 /// optional `repo` (`Some(w)` when multiple repos are polled), `target`,
-/// `branch` (flex), `elapsed`. Mirrors [`hosted_constraints`].
+/// `branch` (flex), `commit` (flex), `elapsed`. Mirrors [`hosted_constraints`].
 fn vercel_constraints(repo_w: Option<u16>) -> Vec<Constraint> {
     let mut c = vec![Constraint::Min(12)];
     if let Some(w) = repo_w {
@@ -532,6 +532,7 @@ fn vercel_constraints(repo_w: Option<u16>) -> Vec<Constraint> {
     }
     c.push(Constraint::Length(VERCEL_TARGET_W));
     c.push(Constraint::Min(8));
+    c.push(Constraint::Min(12));
     c.push(Constraint::Length(HOSTED_ELAPSED_W));
     c
 }
@@ -552,6 +553,7 @@ fn vercel_row(
     p: &Palette,
     project_w: usize,
     branch_w: usize,
+    commit_w: usize,
     repo_w: Option<usize>,
 ) -> Row<'static> {
     let (glyph, color) = match d.status {
@@ -577,6 +579,7 @@ fn vercel_row(
         VERCEL_TARGET_W as usize,
     )));
     cells.push(Cell::from(truncate_ellipsis(&branch, branch_w)));
+    cells.push(Cell::from(truncate_ellipsis(&d.commit_summary, commit_w)));
     cells.push(Cell::from(truncate_ellipsis(
         &elapsed,
         HOSTED_ELAPSED_W as usize,
@@ -591,23 +594,25 @@ fn render_vercel(frame: &mut Frame, area: Rect, view: &View) {
         .multi_repo
         .then(|| deploy_repo_col_width(view.deployments));
     let header_cells = if view.multi_repo {
-        vec!["vercel", "repo", "target", "branch", "elapsed"]
+        vec!["vercel", "repo", "target", "branch", "commit", "elapsed"]
     } else {
-        vec!["vercel", "target", "branch", "elapsed"]
+        vec!["vercel", "target", "branch", "commit", "elapsed"]
     };
     let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
     let cols = vercel_col_layout(area, repo_w);
     let project_w = cols[0].width as usize;
-    // Position-independent so the index shift from the optional repo column can't
-    // desync it: branch is always the second-to-last rect.
-    let branch_w = cols[cols.len() - 2].width as usize;
+    // Position-independent so the index shift from the optional repo column
+    // can't desync it: branch and commit are both flex, so read both back from
+    // the end (elapsed is last, commit is len-2, branch is len-3).
+    let commit_w = cols[cols.len() - 2].width as usize;
+    let branch_w = cols[cols.len() - 3].width as usize;
     let repo_cell_w = repo_w.map(|_| cols[1].width as usize);
 
     let n = view.deployments.len();
     let shown = n.min(VERCEL_CAP);
     let mut rows: Vec<Row> = view.deployments[..shown]
         .iter()
-        .map(|d| vercel_row(d, view.now, p, project_w, branch_w, repo_cell_w))
+        .map(|d| vercel_row(d, view.now, p, project_w, branch_w, commit_w, repo_cell_w))
         .collect();
     if n > VERCEL_CAP {
         rows.push(
@@ -1685,10 +1690,11 @@ mod tests {
     #[test]
     fn vercel_section_renders_building_and_queued() {
         let now = SystemTime::now();
-        let deployments = vec![
-            deployment("pulse", DeployStatus::Building, 30, now),
-            deployment("shepherd", DeployStatus::Queued, 10, now),
-        ];
+        let mut building = deployment("pulse", DeployStatus::Building, 30, now);
+        building.commit_summary = "feat: add pulse widget".into();
+        let mut queued = deployment("shepherd", DeployStatus::Queued, 10, now);
+        queued.commit_summary = "fix: shepherd retry".into();
+        let deployments = vec![building, queued];
         let term = draw_with_deployments(&deployments);
         let content = text(&term);
         assert!(content.contains("pulse"));
@@ -1700,6 +1706,14 @@ mod tests {
             "queued elapsed cell should render"
         );
         assert!(content.contains("vercel"), "vercel header should render");
+        assert!(
+            content.contains("feat: add pulse widget"),
+            "commit summary column should render"
+        );
+        assert!(
+            content.contains("fix: shepherd retry"),
+            "commit summary column should render for queued row too"
+        );
     }
 
     #[test]
