@@ -1,5 +1,5 @@
 use crate::config::{Config, DEFAULT_REPO};
-use crate::model::{JobInfo, RunnerKey};
+use crate::model::{sort_hosted, HostedJob, HostedStatus, JobInfo, RunnerKey};
 use futures_util::{stream, StreamExt};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -11,8 +11,17 @@ use tokio::sync::mpsc;
 /// `None` is busy-without-detail (org scopes).
 type Slice = HashMap<RunnerKey, Option<JobInfo>>;
 
+/// Per-scope poll result: the self-hosted runner slice plus hosted jobs. Kept as
+/// the last-known-good unit so a failed poll preserves both together.
+#[derive(Default, Clone)]
+pub struct ScopeState {
+    pub slice: Slice,
+    pub hosted: Vec<HostedJob>,
+}
+
 pub struct JobsUpdate {
     pub jobs: Slice,
+    pub hosted: Vec<HostedJob>,
     pub error: Option<String>,
 }
 
@@ -82,6 +91,71 @@ pub fn parse_jobs(workflow: &str, branch: &str, json: &str) -> Vec<(String, JobI
         .unwrap_or_default()
 }
 
+/// True if a GitHub job's `labels` array marks it self-hosted. GitHub auto-adds
+/// the `self-hosted` label to every self-hosted runner job; hosted jobs never
+/// carry it. A missing/!array `labels` is treated as not-self-hosted (hosted).
+fn is_self_hosted(labels: &serde_json::Value) -> bool {
+    labels
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|l| l.as_str() == Some("self-hosted")))
+}
+
+/// Hosted (non-self-hosted) jobs in status `in_progress`/`queued` from a run's
+/// jobs payload. `since` is `started_at` for running jobs, `created_at` for
+/// queued. `label` is the first requested label (e.g. `ubuntu-latest`).
+/// The hosted/self-hosted split is decided by [`is_self_hosted`] off the job's
+/// `labels`, which just echo the workflow's `runs-on` request: a self-hosted
+/// workflow whose `runs-on` is a bare custom label (no `self-hosted` in the
+/// list) would also surface here as "hosted".
+pub fn parse_hosted_jobs(workflow: &str, branch: &str, json: &str) -> Vec<HostedJob> {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    v.get("jobs")
+        .and_then(|j| j.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|j| {
+                    let status = match j.get("status").and_then(|s| s.as_str())? {
+                        "in_progress" => HostedStatus::InProgress,
+                        "queued" => HostedStatus::Queued,
+                        _ => return None,
+                    };
+                    let labels = j.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+                    if is_self_hosted(&labels) {
+                        return None;
+                    }
+                    let job = j.get("name")?.as_str()?.to_string();
+                    let label = labels
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("hosted")
+                        .to_string();
+                    let ts_key = match status {
+                        HostedStatus::InProgress => "started_at",
+                        HostedStatus::Queued => "created_at",
+                    };
+                    let since = j
+                        .get(ts_key)
+                        .and_then(|s| s.as_str())
+                        .map(parse_rfc3339)
+                        .unwrap_or_else(SystemTime::now);
+                    Some(HostedJob {
+                        workflow: workflow.to_string(),
+                        job,
+                        label,
+                        branch: branch.to_string(),
+                        status,
+                        since,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Busy runner names from an org/repo runners-endpoint response.
 pub fn parse_org_runners(json: &str) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(json)
@@ -96,11 +170,11 @@ pub fn parse_org_runners(json: &str) -> Vec<String> {
 
 /// Per-scope poll outcome fed to [`merge_scopes`].
 pub enum ScopeOutcome {
-    /// Fresh data — replaces the scope's prior slice (empty ⇒ clears it).
-    Ok(Slice),
-    /// A repo poll failed — keep the prior slice AND flag the scope in the banner.
+    /// Fresh data — replaces the scope's prior state (empty ⇒ clears it).
+    Ok(ScopeState),
+    /// A repo poll failed — keep the prior state AND flag the scope in the banner.
     RepoErr,
-    /// An org poll failed/403 — keep the prior slice, NEVER flag it (the box's
+    /// An org poll failed/403 — keep the prior state, NEVER flag it (the box's
     /// org endpoint is permanently 403; it must not paint a permanent banner).
     OrgSkip,
 }
@@ -109,19 +183,17 @@ pub enum ScopeOutcome {
 /// Returns the new snapshot and, only if a *repo* scope failed, an error summary
 /// naming the failed repos. Org failures are silent by construction.
 pub fn merge_scopes(
-    mut prev: HashMap<String, Slice>,
+    mut prev: HashMap<String, ScopeState>,
     results: Vec<(String, ScopeOutcome)>,
-) -> (HashMap<String, Slice>, Option<String>) {
+) -> (HashMap<String, ScopeState>, Option<String>) {
     let mut failed: Vec<String> = Vec::new();
     for (scope, outcome) in results {
         match outcome {
-            ScopeOutcome::Ok(slice) => {
-                prev.insert(scope, slice);
+            ScopeOutcome::Ok(state) => {
+                prev.insert(scope, state);
             }
-            ScopeOutcome::RepoErr => {
-                failed.push(scope); // keep prior slice
-            }
-            ScopeOutcome::OrgSkip => { /* keep prior slice, no banner */ }
+            ScopeOutcome::RepoErr => failed.push(scope),
+            ScopeOutcome::OrgSkip => {}
         }
     }
     let err = if failed.is_empty() {
@@ -132,14 +204,16 @@ pub fn merge_scopes(
     (prev, err)
 }
 
-fn flatten(per_scope: &HashMap<String, Slice>) -> Slice {
-    let mut out = HashMap::new();
-    for slice in per_scope.values() {
-        for (k, v) in slice {
-            out.insert(k.clone(), v.clone());
+fn flatten(per_scope: &HashMap<String, ScopeState>) -> (Slice, Vec<HostedJob>) {
+    let mut slice = Slice::new();
+    let mut hosted = Vec::new();
+    for state in per_scope.values() {
+        for (k, v) in &state.slice {
+            slice.insert(k.clone(), v.clone());
         }
+        hosted.extend(state.hosted.iter().cloned());
     }
-    out
+    (slice, hosted)
 }
 
 async fn gh_api(path: &str) -> anyhow::Result<String> {
@@ -153,25 +227,29 @@ async fn gh_api(path: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-async fn poll_repo(repo: &str) -> anyhow::Result<Slice> {
-    let runs_json = gh_api(&format!("repos/{repo}/actions/runs?status=in_progress")).await?;
-    let mut slice = Slice::new();
-    for (id, name, branch) in parse_runs(&runs_json) {
-        let jobs_json = gh_api(&format!("repos/{repo}/actions/runs/{id}/jobs")).await?;
-        for (runner_name, ji) in parse_jobs(&name, &branch, &jobs_json) {
-            slice.insert(
-                RunnerKey {
-                    scope: repo.to_string(),
-                    name: runner_name,
-                },
-                Some(ji),
-            );
+async fn poll_repo(repo: &str) -> anyhow::Result<ScopeState> {
+    let mut st = ScopeState::default();
+    for status in ["in_progress", "queued"] {
+        let runs_json = gh_api(&format!("repos/{repo}/actions/runs?status={status}")).await?;
+        for (id, name, branch) in parse_runs(&runs_json) {
+            let jobs_json = gh_api(&format!("repos/{repo}/actions/runs/{id}/jobs")).await?;
+            for (runner_name, ji) in parse_jobs(&name, &branch, &jobs_json) {
+                st.slice.insert(
+                    RunnerKey {
+                        scope: repo.to_string(),
+                        name: runner_name,
+                    },
+                    Some(ji),
+                );
+            }
+            st.hosted
+                .extend(parse_hosted_jobs(&name, &branch, &jobs_json));
         }
     }
-    Ok(slice)
+    Ok(st)
 }
 
-async fn poll_org(org: &str) -> Option<Slice> {
+async fn poll_org(org: &str) -> Option<ScopeState> {
     // 403 (no admin:org) or any error → None → OrgSkip (silent, keep prior).
     let json = gh_api(&format!("orgs/{org}/actions/runners")).await.ok()?;
     let mut slice = Slice::new();
@@ -184,7 +262,10 @@ async fn poll_org(org: &str) -> Option<Slice> {
             None,
         );
     }
-    Some(slice)
+    Some(ScopeState {
+        slice,
+        hosted: Vec::new(),
+    })
 }
 
 /// Whether a scope is polled as a repo (job detail) or an org (busy only).
@@ -212,7 +293,7 @@ async fn poll_scope(scope: String, kind: ScopeKind) -> (String, ScopeOutcome) {
 }
 
 pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
-    let mut prev: HashMap<String, Slice> = HashMap::new();
+    let mut prev: HashMap<String, ScopeState> = HashMap::new();
     loop {
         // The unset-PITWALL_REPO sentinel can't be polled; skip it. Native
         // runners bring their own real scopes, so it's just excluded, not fatal.
@@ -229,6 +310,7 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
             let _ = tx
                 .send(JobsUpdate {
                     jobs: Slice::new(),
+                    hosted: Vec::new(),
                     error: Some(
                         "PITWALL_REPO unset — set it to your runners' repo (e.g. myorg/myrepo)"
                             .into(),
@@ -255,9 +337,12 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
 
         let (next, error) = merge_scopes(std::mem::take(&mut prev), results);
         prev = next;
+        let (jobs, mut hosted) = flatten(&prev);
+        sort_hosted(&mut hosted, SystemTime::now());
         let _ = tx
             .send(JobsUpdate {
-                jobs: flatten(&prev),
+                jobs,
+                hosted,
                 error,
             })
             .await;
@@ -268,8 +353,9 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<JobsUpdate>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::HostedStatus;
 
-    fn slice_with(scope: &str, name: &str) -> Slice {
+    fn state_with(scope: &str, name: &str) -> ScopeState {
         let mut s = Slice::new();
         s.insert(
             RunnerKey {
@@ -283,7 +369,10 @@ mod tests {
                 started_at: SystemTime::now(),
             }),
         );
-        s
+        ScopeState {
+            slice: s,
+            hosted: Vec::new(),
+        }
     }
 
     #[test]
@@ -330,11 +419,11 @@ mod tests {
         let mut prev = HashMap::new();
         prev.insert(
             "scoop/vanscout".to_string(),
-            slice_with("scoop/vanscout", "backontop-vanscout"),
+            state_with("scoop/vanscout", "backontop-vanscout"),
         );
         prev.insert(
             "scoop/kanban-api".to_string(),
-            slice_with("scoop/kanban-api", "backontop-kanban-api"),
+            state_with("scoop/kanban-api", "backontop-kanban-api"),
         );
 
         // vanscout errors (keep prior + banner); kanban-api succeeds empty (clears).
@@ -342,17 +431,17 @@ mod tests {
             ("scoop/vanscout".to_string(), ScopeOutcome::RepoErr),
             (
                 "scoop/kanban-api".to_string(),
-                ScopeOutcome::Ok(Slice::new()),
+                ScopeOutcome::Ok(ScopeState::default()),
             ),
         ];
         let (next, err) = merge_scopes(prev, results);
 
         // vanscout's prior rows persist; kanban-api cleared.
-        assert!(next["scoop/vanscout"].contains_key(&RunnerKey {
+        assert!(next["scoop/vanscout"].slice.contains_key(&RunnerKey {
             scope: "scoop/vanscout".into(),
             name: "backontop-vanscout".into()
         }));
-        assert!(next["scoop/kanban-api"].is_empty());
+        assert!(next["scoop/kanban-api"].slice.is_empty());
         assert_eq!(err.as_deref(), Some("gh: scoop/vanscout"));
     }
 
@@ -367,13 +456,19 @@ mod tests {
             },
             None,
         );
-        prev.insert("ltdovr".to_string(), org_slice);
+        prev.insert(
+            "ltdovr".to_string(),
+            ScopeState {
+                slice: org_slice,
+                hosted: vec![],
+            },
+        );
 
         let (next, err) = merge_scopes(prev, vec![("ltdovr".to_string(), ScopeOutcome::OrgSkip)]);
 
         // No banner from the permanent org 403; prior org busy state preserved.
         assert!(err.is_none());
-        assert!(next["ltdovr"].contains_key(&RunnerKey {
+        assert!(next["ltdovr"].slice.contains_key(&RunnerKey {
             scope: "ltdovr".into(),
             name: "backontop".into()
         }));
@@ -384,7 +479,7 @@ mod tests {
         let mut prev = HashMap::new();
         prev.insert(
             "scoop/vanscout".to_string(),
-            slice_with("scoop/vanscout", "backontop-vanscout"),
+            state_with("scoop/vanscout", "backontop-vanscout"),
         );
         let mut org_slice = Slice::new();
         org_slice.insert(
@@ -394,8 +489,66 @@ mod tests {
             },
             None,
         );
-        prev.insert("ltdovr".to_string(), org_slice);
-        let flat = flatten(&prev);
+        prev.insert(
+            "ltdovr".to_string(),
+            ScopeState {
+                slice: org_slice,
+                hosted: vec![],
+            },
+        );
+        let (flat, _hosted) = flatten(&prev);
         assert_eq!(flat.len(), 2);
+    }
+
+    fn scope_state_with_hosted(job: &str) -> ScopeState {
+        ScopeState {
+            slice: Slice::new(),
+            hosted: vec![HostedJob {
+                workflow: "w".into(),
+                job: job.into(),
+                label: "ubuntu-latest".into(),
+                branch: "main".into(),
+                status: HostedStatus::InProgress,
+                since: SystemTime::now(),
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_repo_error_preserves_prior_hosted() {
+        let mut prev = HashMap::new();
+        prev.insert("o/r".to_string(), scope_state_with_hosted("Build"));
+
+        // Repo poll fails → keep prior scope state (hosted included) + banner.
+        let (next, err) = merge_scopes(prev, vec![("o/r".to_string(), ScopeOutcome::RepoErr)]);
+
+        assert_eq!(next["o/r"].hosted.len(), 1);
+        assert_eq!(next["o/r"].hosted[0].job, "Build");
+        assert_eq!(err.as_deref(), Some("gh: o/r"));
+    }
+
+    #[test]
+    fn parse_hosted_jobs_keeps_hosted_running_and_queued_only() {
+        let out = parse_hosted_jobs(
+            "CI",
+            "main",
+            include_str!("../tests/fixtures/hosted_jobs.json"),
+        );
+        // self-hosted (E2E Tests) excluded; completed (Old Job) excluded.
+        assert_eq!(out.len(), 2);
+
+        let build = out.iter().find(|h| h.job == "Build").unwrap();
+        assert_eq!(build.workflow, "CI");
+        assert_eq!(build.branch, "main");
+        assert_eq!(build.label, "ubuntu-latest");
+        assert_eq!(build.status, HostedStatus::InProgress);
+        // running → since == started_at (12:26:00Z)
+        assert_eq!(build.since, parse_rfc3339("2026-07-04T12:26:00Z"));
+
+        let lint = out.iter().find(|h| h.job == "Lint").unwrap();
+        assert_eq!(lint.label, "ubuntu-24.04");
+        assert_eq!(lint.status, HostedStatus::Queued);
+        // queued → since == created_at (12:26:30Z)
+        assert_eq!(lint.since, parse_rfc3339("2026-07-04T12:26:30Z"));
     }
 }

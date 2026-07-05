@@ -1,4 +1,6 @@
-use crate::model::{elapsed_secs, mem_level, slice_total_bytes, Load, MemLevel, RunnerRow};
+use crate::model::{
+    elapsed_secs, mem_level, slice_total_bytes, HostedJob, HostedStatus, Load, MemLevel, RunnerRow,
+};
 use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -35,6 +37,9 @@ pub struct View<'a> {
     pub unmatched_seen: usize,
     pub warn_ratio: f64,
     pub crit_ratio: f64,
+    /// Hosted (GitHub-hosted) jobs — running + queued — shown in their own
+    /// section below the runner table. Empty ⇒ section hidden.
+    pub hosted: &'a [HostedJob],
 }
 
 pub fn fmt_mem(bytes: u64) -> String {
@@ -55,6 +60,31 @@ pub fn fmt_elapsed(secs: u64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+/// Max hosted rows rendered before collapsing the rest into a `+N more` line.
+const HOSTED_CAP: usize = 6;
+
+/// Vertical cells the hosted section needs for `n` jobs: 0 when empty, else a
+/// header row + up to `HOSTED_CAP` job rows + one overflow line when truncated.
+fn hosted_height(n: usize) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    let shown = n.min(HOSTED_CAP) as u16;
+    let overflow = if n > HOSTED_CAP { 1 } else { 0 };
+    1 + shown + overflow
+}
+
+/// Compact wait/elapsed for queued jobs: `8s`, `2m`, `1h2m`.
+fn fmt_wait(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -335,6 +365,91 @@ fn render_empty_state(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(paragraph, chunks[1]);
 }
 
+const HOSTED_LABEL_W: u16 = 14;
+const HOSTED_ELAPSED_W: u16 = 12;
+
+/// Column rects for the hosted table: `workflow › job` (flex), `label`,
+/// `branch`, `elapsed` — mirrors `column_layout`'s read-back approach so the
+/// flexing cells are truncated to exactly what ratatui allocates.
+fn hosted_col_layout(area: Rect) -> [Rect; 4] {
+    Layout::horizontal([
+        Constraint::Min(12),
+        Constraint::Length(HOSTED_LABEL_W),
+        Constraint::Min(8),
+        Constraint::Length(HOSTED_ELAPSED_W),
+    ])
+    .flex(Flex::Start)
+    .spacing(COL_SPACING)
+    .areas(area)
+}
+
+fn hosted_row(
+    j: &HostedJob,
+    now: SystemTime,
+    p: &Palette,
+    job_w: usize,
+    branch_w: usize,
+) -> Row<'static> {
+    let (glyph, color) = match j.status {
+        HostedStatus::InProgress => ('\u{25cf}', p.busy), // ●
+        HostedStatus::Queued => ('\u{25cb}', p.warn),     // ○
+    };
+    let wj = format!("{} {} \u{203a} {}", glyph, j.workflow, j.job);
+    let branch = if j.branch.is_empty() {
+        "-".to_string()
+    } else {
+        j.branch.clone()
+    };
+    let elapsed = match j.status {
+        HostedStatus::InProgress => fmt_elapsed(elapsed_secs(j.since, now)),
+        HostedStatus::Queued => format!("queued {}", fmt_wait(elapsed_secs(j.since, now))),
+    };
+    Row::new(vec![
+        Cell::from(truncate_ellipsis(&wj, job_w)),
+        Cell::from(truncate_ellipsis(&j.label, HOSTED_LABEL_W as usize)),
+        Cell::from(truncate_ellipsis(&branch, branch_w)),
+        // Truncate like the sibling cells so a long wait/elapsed (e.g. `queued
+        // 100h0m` past HOSTED_ELAPSED_W) ellipsizes instead of hard-clipping.
+        Cell::from(truncate_ellipsis(&elapsed, HOSTED_ELAPSED_W as usize)),
+    ])
+    .style(Style::new().fg(color).bg(p.base))
+}
+
+fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
+    let p = view.palette;
+    let header = Row::new(vec!["hosted", "label", "branch", "elapsed"])
+        .style(Style::new().fg(p.text).bg(p.base).bold());
+    let cols = hosted_col_layout(area);
+    let job_w = cols[0].width as usize;
+    let branch_w = cols[2].width as usize;
+
+    let n = view.hosted.len();
+    let shown = n.min(HOSTED_CAP);
+    let mut rows: Vec<Row> = view.hosted[..shown]
+        .iter()
+        .map(|j| hosted_row(j, view.now, p, job_w, branch_w))
+        .collect();
+    if n > HOSTED_CAP {
+        rows.push(
+            Row::new(vec![Cell::from(format!("+{} more", n - HOSTED_CAP))])
+                .style(Style::new().fg(p.idle).bg(p.base)),
+        );
+    }
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(HOSTED_LABEL_W),
+            Constraint::Min(8),
+            Constraint::Length(HOSTED_ELAPSED_W),
+        ],
+    )
+    .header(header)
+    .column_spacing(COL_SPACING)
+    .style(Style::new().fg(p.text).bg(p.base));
+    frame.render_widget(table, area);
+}
+
 fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
     let total = slice_total_bytes(view.rows);
     let ratio = if view.slice_cap_bytes > 0 {
@@ -376,11 +491,15 @@ pub fn render(frame: &mut Frame, view: &View) {
     );
 
     let has_banner = view.status.is_some();
+    let hosted_h = hosted_height(view.hosted.len());
     let mut constraints = vec![Constraint::Length(1)];
     if has_banner {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(1));
+    if hosted_h > 0 {
+        constraints.push(Constraint::Length(hosted_h));
+    }
     constraints.push(Constraint::Length(1));
     let chunks = Layout::vertical(constraints).split(frame.area());
 
@@ -406,6 +525,11 @@ pub fn render(frame: &mut Frame, view: &View) {
         render_empty_state(frame, body_area, view);
     } else {
         render_table(frame, body_area, view);
+    }
+
+    if hosted_h > 0 {
+        render_hosted(frame, chunks[idx], view);
+        idx += 1;
     }
 
     let gauge_area = chunks[idx];
@@ -458,6 +582,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -663,6 +788,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -814,6 +940,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -874,6 +1001,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -917,6 +1045,7 @@ mod tests {
                         unmatched_seen: 0,
                         warn_ratio: 0.85,
                         crit_ratio: 0.90,
+                        hosted: &[],
                     },
                 );
             })
@@ -947,6 +1076,7 @@ mod tests {
                     unmatched_seen: 0,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -1060,6 +1190,7 @@ mod tests {
                     unmatched_seen: 6,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })
@@ -1073,6 +1204,129 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("6 containers running"));
         assert!(content.contains("ci-runner-"));
+    }
+
+    #[test]
+    fn hosted_height_is_zero_when_empty_and_caps_with_overflow() {
+        assert_eq!(hosted_height(0), 0);
+        assert_eq!(hosted_height(3), 1 + 3); // header + 3 rows
+        assert_eq!(hosted_height(HOSTED_CAP), 1 + HOSTED_CAP as u16);
+        // over cap → header + CAP rows + one "+N more" line
+        assert_eq!(hosted_height(HOSTED_CAP + 5), 1 + HOSTED_CAP as u16 + 1);
+    }
+
+    #[test]
+    fn fmt_wait_compact_units() {
+        assert_eq!(fmt_wait(8), "8s");
+        assert_eq!(fmt_wait(125), "2m");
+        assert_eq!(fmt_wait(3720), "1h2m");
+    }
+
+    #[test]
+    fn hosted_section_shows_running_glyph_queued_label_and_overflow_count() {
+        // 8 hosted jobs > HOSTED_CAP (6): a queued row sits inside the shown
+        // window (mixed with running ones) so both indicators are on-screen,
+        // and the trailing 2 collapse into the "+2 more" overflow line.
+        let now = SystemTime::now();
+        let mut hosted = vec![HostedJob {
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-24.04".into(),
+            branch: "main".into(),
+            status: HostedStatus::Queued,
+            since: now - std::time::Duration::from_secs(10),
+        }];
+        for i in 0..7 {
+            hosted.push(HostedJob {
+                workflow: "CI".into(),
+                job: format!("Build-{i}"),
+                label: "ubuntu-latest".into(),
+                branch: "main".into(),
+                status: HostedStatus::InProgress,
+                since: now - std::time::Duration::from_secs(30),
+            });
+        }
+        assert_eq!(hosted.len(), 8);
+
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        assert!(content.contains('\u{25cf}'), "running glyph should render");
+        assert!(
+            content.contains("queued"),
+            "queued elapsed cell should render"
+        );
+        // 8 jobs, HOSTED_CAP=6 shown → 2 collapse into the overflow line.
+        assert!(
+            content.contains("+2 more"),
+            "overflow line should show +2 more"
+        );
+    }
+
+    #[test]
+    fn hosted_long_wait_ellipsizes_instead_of_hard_clipping() {
+        // `queued 100h0m` is 13 cols, over HOSTED_ELAPSED_W (12). On a wide
+        // terminal the only column that can truncate is the fixed elapsed cell,
+        // so an ellipsis there proves it's routed through truncate_ellipsis (not
+        // hard-clipped). 100h = 360000s.
+        let now = SystemTime::now();
+        let hosted = vec![HostedJob {
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-24.04".into(),
+            branch: "main".into(),
+            status: HostedStatus::Queued,
+            since: now - std::time::Duration::from_secs(360_000),
+        }];
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        assert!(
+            content.contains('\u{2026}'),
+            "long elapsed cell should ellipsize"
+        );
+        assert!(
+            !content.contains("100h0m"),
+            "full wait must not render intact past the column width"
+        );
     }
 
     #[test]
@@ -1095,6 +1349,7 @@ mod tests {
                     unmatched_seen: 2,
                     warn_ratio: 0.85,
                     crit_ratio: 0.90,
+                    hosted: &[],
                 },
             );
         })

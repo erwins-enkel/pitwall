@@ -13,7 +13,9 @@
 //! hard error, not a silent fallback. Override the font directory with
 //! `PITWALL_SCREENSHOT_FONT_DIR` (default `/usr/share/fonts/TTF`).
 
-use pitwall::model::{mem_level, JobInfo, Load, MemLevel, RunnerRow, SourceKind};
+use pitwall::model::{
+    mem_level, HostedJob, HostedStatus, JobInfo, Load, MemLevel, RunnerRow, SourceKind,
+};
 use pitwall::theme::{Flavor, Palette};
 use pitwall::ui::{render, View};
 use ratatui::backend::TestBackend;
@@ -30,10 +32,10 @@ const SLICE_CAP: u64 = 24 * GIB;
 
 // Terminal grid: 160 wide keeps the sparklines plus the full `workflow › job`
 // and `branch` columns visible without ellipsis truncation (see ui.rs
-// `wide_terminal_shows_full_job_branch…`). Height 9 = title + header + 6 rows +
-// gauge, with no blank rows.
+// `wide_terminal_shows_full_job_branch…`). Height 13 = title + header + 6
+// runner rows + gauge (9) + hosted (4), with no blank rows.
 const COLS: u16 = 160;
-const ROWS: u16 = 9;
+const ROWS: u16 = 13; // title + header + 6 runner rows + gauge (9) + hosted (4)
 
 // SVG cell metrics. JetBrains Mono's advance is 0.6em, so CW = 0.6 * FS keeps
 // glyphs from overlapping; each glyph is still centered in its cell so alignment
@@ -49,6 +51,7 @@ fn main() {
     let palette = Palette::for_flavor(Flavor::Mocha);
     // Fixed clock so elapsed durations are deterministic across runs.
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let hosted = demo_hosted(now);
 
     let mut term = Terminal::new(TestBackend::new(COLS, ROWS)).expect("terminal");
     term.draw(|f| {
@@ -65,6 +68,7 @@ fn main() {
                 unmatched_seen: 0,
                 warn_ratio: WARN,
                 crit_ratio: CRIT,
+                hosted: &hosted,
             },
         );
     })
@@ -134,6 +138,38 @@ fn demo_rows() -> Vec<RunnerRow> {
             wave(20, 0.1, 0.5, 1.2, 0.3),
             flat(20, 0.0),
         ),
+    ]
+}
+
+/// Three synthetic hosted jobs (two running, one queued), anchored to the
+/// fixed `now` used throughout the example so the screenshot is deterministic.
+fn demo_hosted(now: SystemTime) -> Vec<HostedJob> {
+    let ago = |s: u64| now - Duration::from_secs(s);
+    vec![
+        HostedJob {
+            workflow: "Deploy".into(),
+            job: "build".into(),
+            label: "ubuntu-latest".into(),
+            branch: "main".into(),
+            status: HostedStatus::InProgress,
+            since: ago(72),
+        },
+        HostedJob {
+            workflow: "E2E".into(),
+            job: "chromium".into(),
+            label: "ubuntu-24.04".into(),
+            branch: "main".into(),
+            status: HostedStatus::InProgress,
+            since: ago(44),
+        },
+        HostedJob {
+            workflow: "Release".into(),
+            job: "publish".into(),
+            label: "ubuntu-latest".into(),
+            branch: "v2.1".into(),
+            status: HostedStatus::Queued,
+            since: ago(8),
+        },
     ]
 }
 
