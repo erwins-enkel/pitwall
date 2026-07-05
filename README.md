@@ -90,7 +90,7 @@ config file → built-in default**.
 | Setting | Env var | File key | Default |
 |---|---|---|---|
 | socket | `PITWALL_SOCKET` | `socket` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
-| repo | `PITWALL_REPO` | `repo` | `owner/repo` (set this to your runners' repo) |
+| repo | `PITWALL_REPO` | `repo` | `owner/repo` (set this to your runners' repo; comma-separated string or array in TOML; all listed repos are polled for job detail and hosted jobs) |
 | prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` (must match your runner container names, e.g. `myorg-ci-runner-`) |
 | slice cap (GiB) | `PITWALL_SLICE_CAP_GIB` | `slice_cap_gib` | `24` |
 | theme | `PITWALL_THEME` | `theme` | `mocha` — Catppuccin flavor: `mocha`, `macchiato`, `frappe`, or `latte` (light). Unknown values fall back to `mocha`. |
@@ -112,7 +112,7 @@ point elsewhere. All keys are optional:
 
 ```toml
 # ~/.config/pitwall/config.toml
-repo          = "your-org/your-repo"           # required: your runners' repo
+repo          = ["your-org/your-repo", "your-org/another-repo"]  # one or more repos
 socket        = "/run/user/1000/docker.sock"   # 1000 = your numeric UID (`id -u`)
 prefix        = "ci-runner-"
 slice_cap_gib = 24
@@ -130,6 +130,11 @@ Notes:
   file `socket` → `DOCKER_HOST` → `/run/user/$UID/docker.sock`. The file value
   intentionally overrides the ambient `DOCKER_HOST` env var, since it is
   deliberate pitwall configuration rather than an ambient docker setting.
+- **Docker runners tagged with first repo.** When configuring multiple repos,
+  Docker/prefix-matched runners are tagged with the **first configured repo**.
+  List the repo your Docker runners belong to first, or they won't match their
+  jobs and will show idle. Native runners are unaffected — they carry their own
+  repo scope from discovery.
 - A malformed file, or one with an unknown key, is a hard error: pitwall reports
   it and exits without starting the UI.
 - The default file is optional — its absence is fine. A `PITWALL_CONFIG` path

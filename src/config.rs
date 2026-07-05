@@ -5,26 +5,24 @@ use std::path::PathBuf;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-/// Sentinel repo used when `PITWALL_REPO` is unset. The jobs poller detects it
-/// and surfaces a "set PITWALL_REPO" hint instead of polling `gh` for a repo
-/// that can't exist (which returns a bare 404).
-pub const DEFAULT_REPO: &str = "owner/repo";
-
 #[derive(Clone)]
 pub struct Config {
     pub socket_path: String,
-    pub repo: String,
     pub prefix: String,
     pub slice_cap_bytes: u64,
     pub flavor: Flavor,
     pub warn_ratio: f64,
     pub crit_ratio: f64,
-    /// Repos to poll for in-progress job detail. Defaults to `[repo]`; `app`
+    /// Repos to poll for in-progress job detail. Defaults to `configured_repos`; `app`
     /// augments this with native runners' repo-scopes (deduplicated) at startup.
     pub repos: Vec<String>,
     /// Orgs to poll for runner busy status (native org-scoped runners). Empty by
     /// default; populated from native discovery at startup.
     pub orgs: Vec<String>,
+    /// User-configured repos (from `PITWALL_REPO` / the TOML `repo` key). Empty
+    /// when unset. `app` seeds `derive_scopes` from this; the derived poll list
+    /// lands in `repos`.
+    pub configured_repos: Vec<String>,
 }
 
 const DEFAULT_WARN_PCT: u64 = 85;
@@ -48,6 +46,16 @@ fn resolve_thresholds(warn_raw: Option<&str>, crit_raw: Option<&str>) -> (f64, f
     (warn as f64 / 100.0, crit as f64 / 100.0)
 }
 
+/// The TOML `repo` key accepts either a single repo string or an array of them
+/// (each entry may itself be comma-separated). Untagged so both forms parse
+/// transparently.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RepoField {
+    One(String),
+    Many(Vec<String>),
+}
+
 /// Optional settings parsed from the TOML config file. Every field is optional:
 /// a missing field falls through to the matching env var (which overrides the
 /// file) or the built-in default. Unknown keys are rejected so typos surface
@@ -56,7 +64,7 @@ fn resolve_thresholds(warn_raw: Option<&str>, crit_raw: Option<&str>) -> (f64, f
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     socket: Option<String>,
-    repo: Option<String>,
+    repo: Option<RepoField>,
     prefix: Option<String>,
     slice_cap_gib: Option<u64>,
     theme: Option<String>,
@@ -141,6 +149,36 @@ fn load_file(cp: ConfigPath) -> anyhow::Result<Option<FileConfig>> {
     Ok(Some(cfg))
 }
 
+/// Split a repo spec on commas, trimming each entry and dropping empties.
+fn split_repos(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Order-preserving dedup — keeps the first occurrence of each repo.
+fn dedup_preserve(v: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(v.len());
+    for s in v {
+        if !out.iter().any(|e| e == &s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Flatten a TOML `repo` field (string or array; entries may be comma-separated)
+/// into a repo list.
+fn repo_field_to_vec(f: Option<RepoField>) -> Vec<String> {
+    match f {
+        Some(RepoField::One(s)) => split_repos(&s),
+        Some(RepoField::Many(v)) => v.iter().flat_map(|s| split_repos(s)).collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Layer the file config under the environment: for each key an env var (when
 /// set to a usable value) wins, else the file value, else the built-in default.
 /// `socket` additionally consults `DOCKER_HOST` between the file value and the
@@ -152,9 +190,11 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
         .or_else(|| env_nonempty(get, "DOCKER_HOST").and_then(|h| unix_socket_from_docker_host(&h)))
         .unwrap_or_else(default_socket_path);
 
-    let repo = env_nonempty(get, "PITWALL_REPO")
-        .or(file.repo)
-        .unwrap_or_else(|| DEFAULT_REPO.into());
+    // Env (comma-separated) wins over the file's string-or-array; empty ⇒ unset.
+    let configured_repos = match env_nonempty(get, "PITWALL_REPO") {
+        Some(env_val) => dedup_preserve(split_repos(&env_val)),
+        None => dedup_preserve(repo_field_to_vec(file.repo)),
+    };
 
     let prefix = env_nonempty(get, "PITWALL_PREFIX")
         .or(file.prefix)
@@ -180,10 +220,10 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
     );
 
     Config {
-        repos: vec![repo.clone()],
+        repos: configured_repos.clone(),
         orgs: vec![],
         socket_path,
-        repo,
+        configured_repos,
         prefix,
         slice_cap_bytes: cap_gib.saturating_mul(GIB),
         flavor,
@@ -260,12 +300,68 @@ mod tests {
         assert!(approx(w, 0.0) && approx(c, 0.0));
     }
 
+    // ---- split_repos / dedup_preserve -----------------------------------
+
+    #[test]
+    fn split_repos_trims_and_drops_empties() {
+        assert_eq!(split_repos("a/b, c/d"), vec!["a/b", "c/d"]);
+        assert_eq!(split_repos("  x/y  "), vec!["x/y"]);
+        assert_eq!(split_repos("a/b,,c/d,"), vec!["a/b", "c/d"]);
+        assert!(split_repos("").is_empty());
+        assert!(split_repos("  ,  ").is_empty());
+    }
+
+    #[test]
+    fn dedup_preserve_keeps_first_occurrence_order() {
+        assert_eq!(
+            dedup_preserve(vec!["a/b".into(), "c/d".into(), "a/b".into(), "e/f".into()]),
+            vec!["a/b", "c/d", "e/f"]
+        );
+    }
+
+    // ---- resolve() multi-repo -------------------------------------------
+
+    #[test]
+    fn resolve_comma_env_yields_multiple_repos() {
+        let c = resolve(FileConfig::default(), &env(&[("PITWALL_REPO", "a/b, c/d")]));
+        assert_eq!(c.configured_repos, vec!["a/b", "c/d"]);
+    }
+
+    #[test]
+    fn resolve_toml_array_yields_multiple_repos() {
+        let file = FileConfig {
+            repo: Some(RepoField::Many(vec!["a/b".into(), "c/d".into()])),
+            ..Default::default()
+        };
+        let c = resolve(file, &env(&[]));
+        assert_eq!(c.configured_repos, vec!["a/b", "c/d"]);
+    }
+
+    #[test]
+    fn resolve_toml_string_with_comma_splits() {
+        let file = FileConfig {
+            repo: Some(RepoField::One("a/b,c/d".into())),
+            ..Default::default()
+        };
+        let c = resolve(file, &env(&[]));
+        assert_eq!(c.configured_repos, vec!["a/b", "c/d"]);
+    }
+
+    #[test]
+    fn resolve_dedups_repeated_repos() {
+        let c = resolve(
+            FileConfig::default(),
+            &env(&[("PITWALL_REPO", "a/b,a/b,c/d")]),
+        );
+        assert_eq!(c.configured_repos, vec!["a/b", "c/d"]);
+    }
+
     // ---- resolve() -------------------------------------------------------
 
     #[test]
     fn defaults_when_env_and_file_empty() {
         let c = resolve(FileConfig::default(), &env(&[]));
-        assert_eq!(c.repo, "owner/repo");
+        assert!(c.configured_repos.is_empty());
         assert_eq!(c.prefix, "ci-runner-");
         assert_eq!(c.slice_cap_bytes, 24 * GIB);
         assert_eq!(c.socket_path, default_socket_path());
@@ -276,14 +372,14 @@ mod tests {
     fn file_values_used_when_env_unset() {
         let file = FileConfig {
             socket: Some("/file.sock".into()),
-            repo: Some("o/r".into()),
+            repo: Some(RepoField::One("o/r".into())),
             prefix: Some("px-".into()),
             slice_cap_gib: Some(8),
             theme: Some("latte".into()),
         };
         let c = resolve(file, &env(&[]));
         assert_eq!(c.socket_path, "/file.sock");
-        assert_eq!(c.repo, "o/r");
+        assert_eq!(c.configured_repos, vec!["o/r"]);
         assert_eq!(c.prefix, "px-");
         assert_eq!(c.slice_cap_bytes, 8 * GIB);
         // File `theme` is honored when the env var is unset.
@@ -294,7 +390,7 @@ mod tests {
     fn env_overrides_file() {
         let file = FileConfig {
             socket: Some("/file.sock".into()),
-            repo: Some("file/repo".into()),
+            repo: Some(RepoField::One("file/repo".into())),
             prefix: Some("file-".into()),
             slice_cap_gib: Some(8),
             theme: Some("latte".into()),
@@ -310,7 +406,7 @@ mod tests {
             ]),
         );
         assert_eq!(c.socket_path, "/env.sock");
-        assert_eq!(c.repo, "env/repo");
+        assert_eq!(c.configured_repos, vec!["env/repo"]);
         assert_eq!(c.prefix, "env-");
         assert_eq!(c.slice_cap_bytes, 16 * GIB);
         assert_eq!(c.flavor, Flavor::Frappe);
@@ -330,12 +426,12 @@ mod tests {
     fn empty_env_treated_as_unset() {
         let file = FileConfig {
             socket: Some("/file.sock".into()),
-            repo: Some("file/repo".into()),
+            repo: Some(RepoField::One("file/repo".into())),
             ..Default::default()
         };
         let c = resolve(file, &env(&[("PITWALL_SOCKET", ""), ("PITWALL_REPO", "")]));
         assert_eq!(c.socket_path, "/file.sock");
-        assert_eq!(c.repo, "file/repo");
+        assert_eq!(c.configured_repos, vec!["file/repo"]);
     }
 
     #[test]
@@ -444,8 +540,17 @@ mod tests {
         std::fs::write(&p, "repo = \"o/r\"\nslice_cap_gib = 4\n").unwrap();
         let cfg = load_file(ConfigPath::Explicit(p.clone())).unwrap().unwrap();
         std::fs::remove_file(&p).unwrap();
-        assert_eq!(cfg.repo.as_deref(), Some("o/r"));
+        assert!(matches!(cfg.repo, Some(RepoField::One(ref s)) if s == "o/r"));
         assert_eq!(cfg.slice_cap_gib, Some(4));
+    }
+
+    #[test]
+    fn load_toml_repo_array_parses() {
+        let p = temp_path("repo-array.toml");
+        std::fs::write(&p, "repo = [\"o/r\", \"a/b\"]\n").unwrap();
+        let cfg = load_file(ConfigPath::Explicit(p.clone())).unwrap().unwrap();
+        std::fs::remove_file(&p).unwrap();
+        assert!(matches!(cfg.repo, Some(RepoField::Many(ref v)) if v == &["o/r", "a/b"]));
     }
 
     #[test]
@@ -467,7 +572,7 @@ mod tests {
         let cfg = load_file(ConfigPath::Explicit(p))
             .expect("config.example.toml must parse")
             .expect("config.example.toml must exist");
-        assert_eq!(cfg.repo.as_deref(), Some("your-org/your-repo"));
+        assert!(matches!(cfg.repo, Some(RepoField::One(ref s)) if s == "your-org/your-repo"));
     }
 
     // ---- unix_socket_from_docker_host() ---------------------------------

@@ -8,6 +8,10 @@
 # PITWALL_REPO" hint, so set it here (or via PITWALL_REPO).
 repo = "your-org/your-repo"
 
+# repo may be one repo or several — a comma-separated string or an array:
+#   repo = "your-org/your-repo, your-org/another-repo"
+#   repo = ["your-org/your-repo", "your-org/another-repo"]
+
 # Rootless Docker socket. Default: $DOCKER_HOST (unix:// stripped) if set, else
 # /run/user/$UID/docker.sock. TOML does no $UID expansion — if you uncomment
 # this, replace $UID with your numeric UID (`id -u`). Left commented, pitwall
