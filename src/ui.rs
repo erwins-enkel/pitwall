@@ -19,6 +19,10 @@ const SPARK_WIDTH: usize = 20;
 /// CPU spark auto-scales to its window max but never below this, so idle jitter
 /// (0.1–0.3%) reads as a flat baseline rather than amplified noise.
 const CPU_SPARK_FLOOR: f64 = 10.0;
+/// Memory spark's window-max height ceiling never drops below this fraction of the
+/// slice cap, so a genuinely-idle slice reads low instead of being amplified to full
+/// height. Cap-relative (not an absolute byte floor) so it tracks the configured cap.
+const MEM_SPARK_FLOOR_FRACTION: f64 = 0.10;
 
 /// Braille dot-pattern bits (relative to U+2800) for the left column, indexed by
 /// fill height 0..=4 (bottom-up). See `braille_glyph`.
@@ -810,26 +814,26 @@ fn render_memory(frame: &mut Frame, area: Rect, view: &View) {
     // Sparkline fills whatever width is left after the reserved label region.
     let spark_width = (area.width as usize).saturating_sub(label_region + 1);
     if spark_width > 0 {
-        // Raw slice-total bytes scaled against the cap, mirroring how the CPU
-        // column scales raw percent against its window max. A zero cap can't be
-        // divided, so fall back to a flat baseline (height_max 0) with the idle
-        // gradient anchor.
-        let height_max = if cap > 0 { cap as f64 } else { 0.0 };
+        // Height auto-scales to the window max of the *visible tail* — the same last
+        // `2 * spark_width` samples `spark_line` renders. Folding the whole 480-sample
+        // buffer would pin the scale to off-screen peaks and flatten the on-screen line;
+        // the tail fold keeps blips visible as usage varies. A cap-relative floor
+        // (`MEM_SPARK_FLOOR_FRACTION`) keeps a genuinely-idle slice reading low. Color is
+        // independent and stays *cap-anchored* (`v / cap`), so near-cap red is unchanged.
+        // With cap == 0 the floor is 0, so height follows the tail max alone (baseline
+        // dots only when that tail is also all-zero) and color falls to the flat `p.busy`.
+        let hist = view.slice_mem_hist;
+        let tail_start = hist.len().saturating_sub(2 * spark_width);
+        let window_max = hist[tail_start..].iter().copied().fold(0.0, f64::max);
+        let height_max = window_max.max(cap as f64 * MEM_SPARK_FLOOR_FRACTION);
         let cap_f = cap as f64;
-        let spark = spark_line(
-            view.slice_mem_hist,
-            height_max,
-            spark_width,
-            p,
-            false,
-            |v| {
-                if cap > 0 {
-                    gradient(v / cap_f, view.warn_ratio, view.crit_ratio, p)
-                } else {
-                    p.busy
-                }
-            },
-        );
+        let spark = spark_line(hist, height_max, spark_width, p, false, |v| {
+            if cap > 0 {
+                gradient(v / cap_f, view.warn_ratio, view.crit_ratio, p)
+            } else {
+                p.busy
+            }
+        });
         spans.extend(spark.spans);
     }
 
@@ -1802,6 +1806,57 @@ mod tests {
             "memory box should use the near_cap color"
         );
         assert!(text.contains("\u{26a0} NEAR CAP"));
+    }
+
+    /// Distinct braille (U+2800..=U+28FF) glyphs on the memory content row, scoped to
+    /// the sparkline. The numeric label contributes many distinct non-braille glyphs,
+    /// so a whole-row distinct count wouldn't isolate the sparkline's variation.
+    fn distinct_memory_braille(text: &str) -> usize {
+        text.chars()
+            .filter(|c| ('\u{2800}'..='\u{28ff}').contains(c))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
+    #[test]
+    fn memory_sparkline_scales_to_window_max_so_sub_cap_variation_blips() {
+        // Every sample is below 37.5% of the cap, so under the old cap-anchored height
+        // scale (`height_max = cap`) each rounds to dot-height 1 — a uniform flat
+        // baseline (all `⣀`). Scaling height to the window max instead surfaces the
+        // variation as distinct braille heights.
+        let cap = 24 * 1024 * 1024 * 1024;
+        let rows = vec![row(8 * 1024 * 1024 * 1024, Load::Busy, MemLevel::Normal)];
+        let hist: Vec<f64> = [0.15, 0.22, 0.30, 0.35, 0.28, 0.20, 0.33, 0.18]
+            .iter()
+            .map(|f| cap as f64 * f)
+            .collect();
+        let (_colors, text) = memory_row(&rows, cap, &hist);
+        assert!(
+            distinct_memory_braille(&text) > 1,
+            "sub-cap variation must render more than one braille height (a blip); \
+             got a flat baseline"
+        );
+    }
+
+    #[test]
+    fn memory_sparkline_ignores_off_screen_peak_when_scaling() {
+        // History far longer than the visible window: a full-cap peak sits at the far
+        // left and scrolls off-screen; the visible tail is the same sub-37.5% pattern.
+        // A whole-buffer fold would pin `height_max` to that peak and flatten the tail
+        // to a single baseline glyph; folding the rendered tail keeps the blip.
+        let cap = 24 * 1024 * 1024 * 1024;
+        let rows = vec![row(8 * 1024 * 1024 * 1024, Load::Busy, MemLevel::Normal)];
+        let pattern = [0.15, 0.22, 0.30, 0.35, 0.28, 0.20, 0.33, 0.18];
+        let mut hist = vec![cap as f64]; // off-screen peak
+        while hist.len() < 400 {
+            hist.push(cap as f64 * pattern[hist.len() % pattern.len()]);
+        }
+        let (_colors, text) = memory_row(&rows, cap, &hist);
+        assert!(
+            distinct_memory_braille(&text) > 1,
+            "an off-screen peak must not flatten the visible line; height must scale to \
+             the rendered tail, not the whole buffer"
+        );
     }
 
     #[test]
