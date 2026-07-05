@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Rust dependencies (Cargo.toml / Cargo.lock).
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Explicit conventional-commit prefixes so Dependabot PRs pass the `commits`
+    # CI gate (cog) instead of relying on its auto-detection.
+    commit-message:
+      prefix: "build"
+      prefix-development: "chore"
+
+  # GitHub Actions pinned by SHA in the workflows — keep them fresh automatically.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci"

@@ -28,3 +28,33 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --locked
+
+  machete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4, 2026-07-04
+      - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2.82.8, 2026-07-03
+        with:
+          tool: cargo-machete
+      - name: machete
+        run: cargo machete
+
+  commits:
+    # Lint only the commits introduced by the PR against Conventional Commits.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4, 2026-07-04
+        with:
+          fetch-depth: 0
+      - name: install cocogitto
+        # Pinned prebuilt binary (cocogitto 7.0.0, 2026-03-04) — no source compile.
+        run: |
+          mkdir -p "$RUNNER_TEMP/cog"
+          curl -sSL https://github.com/cocogitto/cocogitto/releases/download/7.0.0/cocogitto-7.0.0-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz --strip-components=1 -C "$RUNNER_TEMP/cog" x86_64-unknown-linux-musl/cog
+          echo "$RUNNER_TEMP/cog" >> "$GITHUB_PATH"
+      - name: check commit messages
+        run: |
+          cog --version
+          cog check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}

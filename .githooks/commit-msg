@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Lint the commit message against the Conventional Commits spec via cocogitto.
+# CI (the `commits` job) is the authoritative gate; this hook is fast local
+# feedback and fails open when cog isn't installed.
+set -euo pipefail
+
+# Find cog on PATH, or in the cargo bin dir (which isn't always on PATH).
+cog="$(command -v cog || true)"
+if [ -z "$cog" ] && [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cog" ]; then
+  cog="${CARGO_HOME:-$HOME/.cargo}/bin/cog"
+fi
+
+if [ -n "$cog" ]; then
+  "$cog" verify --file "$1"
+else
+  echo "commit-msg: cocogitto (cog) not found — skipping commit-message lint (CI enforces it)." >&2
+  echo "           install with: cargo install cocogitto --version 7.0.0" >&2
+fi
