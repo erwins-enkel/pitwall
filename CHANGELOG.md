@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.3.1...pitwall-v0.3.2) (2026-07-05)
+
+
+### Bug Fixes
+
+* **ui:** scale memory graph to its visible window max ([#47](https://github.com/erwins-enkel/pitwall/issues/47)) ([85700cd](https://github.com/erwins-enkel/pitwall/commit/85700cd3b593870067540f47add255fe89c69ade))
+
 ## [0.3.1](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.3.0...pitwall-v0.3.1) (2026-07-05)
 
 
