@@ -244,10 +244,10 @@ const COL_SPACING: u16 = 1;
 const RUNNER_IDX: usize = 0;
 const JOB_IDX: usize = 5;
 const BRANCH_IDX: usize = 6;
-/// Floor for the runner column so the `runner` header never clips.
-const RUNNER_HEADER_W: usize = 6; // "runner"
+/// Floor for the runner column so the `name` header never clips.
+const RUNNER_HEADER_W: usize = 4; // "name"
 
-/// Width for the runner column: the widest runner name in `rows`, floored at the `runner`
+/// Width for the runner column: the widest runner name in `rows`, floored at the `name`
 /// header width. Content-derived so the distinguishing `-N` suffix stays visible for any
 /// `PITWALL_PREFIX` — a fixed width would re-clip a longer prefix. The `Length` this feeds
 /// is shrunk by ratatui's solver under space pressure (no manual bound here); the rendered
@@ -258,7 +258,7 @@ fn runner_col_width(rows: &[RunnerRow]) -> u16 {
         .fold(RUNNER_HEADER_W, usize::max) as u16
 }
 
-/// Column constraints for the runner table. `runner` is a `Length` sized to the widest
+/// Column constraints for the runner table. `name` is a `Length` sized to the widest
 /// name (`runner_w`, from `runner_col_width`); `job` and `branch` are `Min` so they absorb
 /// leftover terminal width; the rest are fixed. This single array feeds both the rendered
 /// `Table` and `column_layout` so the width used to truncate cells can never diverge from
@@ -439,7 +439,7 @@ fn table_row(
 fn render_table(frame: &mut Frame, area: Rect, view: &View) {
     let p = view.palette;
     let header = Row::new(vec![
-        "runner",
+        "name",
         "cpu",
         "~cpu",
         "mem",
@@ -1281,9 +1281,9 @@ mod tests {
             busy_row("pulse-ci-runner-10", "CI", "t", "main", 1),
         ];
         assert_eq!(runner_col_width(&rows), 18); // "pulse-ci-runner-10"
-                                                 // Floors at the "runner" header width for short names / no rows.
-        assert_eq!(runner_col_width(&[busy_row("r1", "CI", "t", "main", 1)]), 6);
-        assert_eq!(runner_col_width(&[]), 6);
+                                                 // Floors at the "name" header width for short names / no rows.
+        assert_eq!(runner_col_width(&[busy_row("r1", "CI", "t", "main", 1)]), 4);
+        assert_eq!(runner_col_width(&[]), 4);
     }
 
     /// Reads the runner column's cells at the first data row into a trimmed string.
