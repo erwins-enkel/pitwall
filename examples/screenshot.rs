@@ -32,10 +32,11 @@ const SLICE_CAP: u64 = 24 * GIB;
 
 // Terminal grid: 160 wide keeps the sparklines plus the full `workflow › job`
 // and `branch` columns visible without ellipsis truncation (see ui.rs
-// `wide_terminal_shows_full_job_branch…`). Height 13 = title + header + 6
-// runner rows + gauge (9) + hosted (4), with no blank rows.
+// `wide_terminal_shows_full_job_branch…`). Each section is a btop-style box, so
+// height 19 = title (1) + runners box (2 border + header + 6 rows = 9) + hosted
+// box (2 border + header + 3 rows = 6) + memory box (3), with no blank rows.
 const COLS: u16 = 160;
-const ROWS: u16 = 13; // title + header + 6 runner rows + gauge (9) + hosted (4)
+const ROWS: u16 = 19;
 
 // SVG cell metrics. JetBrains Mono's advance is 0.6em, so CW = 0.6 * FS keeps
 // glyphs from overlapping; each glyph is still centered in its cell so alignment

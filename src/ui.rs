@@ -6,7 +6,7 @@ use crate::theme::Palette;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Cell, Gauge, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 use std::time::SystemTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -591,18 +591,29 @@ fn render_hosted(frame: &mut Frame, area: Rect, view: &View) {
     // `repo` column only when polling more than one repo; then it slots between
     // `workflow › job` and `label`, shifting `branch` one rect to the right.
     let repo_w = view.multi_repo.then(|| repo_col_width(view.hosted));
-    let header_cells = if view.multi_repo {
-        vec!["hosted", "repo", "label", "branch", "elapsed"]
-    } else {
-        vec!["hosted", "label", "branch", "elapsed"]
-    };
-    let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
     let cols = hosted_col_layout(area, repo_w);
     let job_w = cols[0].width as usize;
     // Position-independent so the index shift from the optional repo column can't
     // desync it: branch is always the second-to-last rect.
     let branch_w = cols[cols.len() - 2].width as usize;
     let repo_cell_w = repo_w.map(|_| cols[1].width as usize);
+
+    // The section label lives in the box title now, so the first header cell
+    // shows its real column name. `workflow › job` (14 cols) can exceed this flex
+    // column's Min(12) floor on a very narrow terminal, so truncate it with an
+    // ellipsis to the allocated width — the same graceful degradation as the data
+    // cells — rather than letting ratatui hard-clip it.
+    let mut header_cells = vec![Cell::from(truncate_ellipsis(
+        "workflow \u{203a} job",
+        job_w,
+    ))];
+    if view.multi_repo {
+        header_cells.push(Cell::from("repo"));
+    }
+    header_cells.push(Cell::from("label"));
+    header_cells.push(Cell::from("branch"));
+    header_cells.push(Cell::from("elapsed"));
+    let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
 
     let n = view.hosted.len();
     let shown = n.min(HOSTED_CAP);
@@ -721,10 +732,12 @@ fn render_vercel(frame: &mut Frame, area: Rect, view: &View) {
     let repo_w = view
         .multi_repo
         .then(|| deploy_repo_col_width(view.deployments));
+    // The section label lives in the box title now, so the first header cell
+    // shows its real column name.
     let header_cells = if view.multi_repo {
-        vec!["vercel", "repo", "target", "branch", "commit", "elapsed"]
+        vec!["project", "repo", "target", "branch", "commit", "elapsed"]
     } else {
-        vec!["vercel", "target", "branch", "commit", "elapsed"]
+        vec!["project", "target", "branch", "commit", "elapsed"]
     };
     let header = Row::new(header_cells).style(Style::new().fg(p.text).bg(p.base).bold());
     let cols = vercel_col_layout(area, repo_w);
@@ -786,6 +799,27 @@ fn render_gauge(frame: &mut Frame, area: Rect, view: &View) {
     frame.render_widget(gauge, area);
 }
 
+/// A btop-style section panel: a rounded box with `title` set into the top-left
+/// of its border. The border uses the dim `idle` gray so the frame recedes; the
+/// title is bold `text` so it stays readable. Callers render the block, then
+/// draw content into `block.inner(area)`.
+fn section_block(title: &str, p: &Palette) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(p.idle).bg(p.base))
+        // One column of horizontal breathing room so content doesn't butt against
+        // the border. `block.inner()` folds this into the rect callers lay out in.
+        .padding(Padding::horizontal(1))
+        .title(Line::from(Span::styled(
+            format!(" {title} "),
+            Style::new()
+                .fg(p.text)
+                .bg(p.base)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .style(Style::new().fg(p.text).bg(p.base))
+}
+
 pub fn render(frame: &mut Frame, view: &View) {
     let p = view.palette;
     // Paint the whole frame with the Catppuccin base so any cell not covered by
@@ -802,14 +836,17 @@ pub fn render(frame: &mut Frame, view: &View) {
     if has_banner {
         constraints.push(Constraint::Length(1));
     }
-    constraints.push(Constraint::Min(1));
+    // Each section is a btop-style box, so its slot carries the content height
+    // plus 2 border rows. The runners body flexes; Min(3) keeps a degenerate box
+    // (2 border rows + 1 content row) from collapsing its content away.
+    constraints.push(Constraint::Min(3));
     if hosted_h > 0 {
-        constraints.push(Constraint::Length(hosted_h));
+        constraints.push(Constraint::Length(hosted_h + 2));
     }
     if vercel_h > 0 {
-        constraints.push(Constraint::Length(vercel_h));
+        constraints.push(Constraint::Length(vercel_h + 2));
     }
-    constraints.push(Constraint::Length(1));
+    constraints.push(Constraint::Length(3));
     let chunks = Layout::vertical(constraints).split(frame.area());
 
     let mut idx = 0;
@@ -828,26 +865,44 @@ pub fn render(frame: &mut Frame, view: &View) {
         frame.render_widget(banner, banner_area);
     }
 
+    // render() owns every section box: it draws the block, then hands the inner
+    // rect to the content renderer. Each renderer lays its columns out against
+    // that inner rect, so the read-back widths match exactly what ratatui draws
+    // inside the border.
     let body_area = chunks[idx];
     idx += 1;
+    let body_block = section_block("runners", p);
+    let body_inner = body_block.inner(body_area);
+    frame.render_widget(body_block, body_area);
     if view.rows.is_empty() {
-        render_empty_state(frame, body_area, view);
+        render_empty_state(frame, body_inner, view);
     } else {
-        render_table(frame, body_area, view);
+        render_table(frame, body_inner, view);
     }
 
     if hosted_h > 0 {
-        render_hosted(frame, chunks[idx], view);
+        let area = chunks[idx];
         idx += 1;
+        let block = section_block("hosted", p);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        render_hosted(frame, inner, view);
     }
 
     if vercel_h > 0 {
-        render_vercel(frame, chunks[idx], view);
+        let area = chunks[idx];
         idx += 1;
+        let block = section_block("vercel", p);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        render_vercel(frame, inner, view);
     }
 
     let gauge_area = chunks[idx];
-    render_gauge(frame, gauge_area, view);
+    let gauge_block = section_block("memory", p);
+    let gauge_inner = gauge_block.inner(gauge_area);
+    frame.render_widget(gauge_block, gauge_area);
+    render_gauge(frame, gauge_inner, view);
 }
 
 #[cfg(test)]
@@ -1234,7 +1289,9 @@ mod tests {
     /// Reads the runner column's cells at the first data row into a trimmed string.
     fn runner_cell(rows: &[RunnerRow], width: u16) -> String {
         let palette = Palette::for_flavor(Flavor::Mocha);
-        let mut term = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        // Height 10 clears the box floor (title 1 + runners box border 2 +
+        // header 1 + ≥1 data row + memory box 3 = 8) with headroom.
+        let mut term = Terminal::new(TestBackend::new(width, 10)).unwrap();
         term.draw(|f| {
             render(
                 f,
@@ -1257,9 +1314,12 @@ mod tests {
         })
         .unwrap();
         let buf = term.backend().buffer().clone();
-        let cols = column_layout(Rect::new(0, 0, width, 1), runner_col_width(rows));
+        // The runners box insets content by 2 cols each side (border + padding),
+        // so read columns back from the inner rect the table actually lays out in.
+        let cols = column_layout(Rect::new(2, 0, width - 4, 1), runner_col_width(rows));
         let r = cols[RUNNER_IDX];
-        let data_y = 2; // no banner: title y=0, header y=1, first data row y=2
+        // title y=0, runners box top border y=1, header y=2, first data row y=3.
+        let data_y = 3;
         (r.x..r.x + r.width)
             .map(|x| buf[(x, data_y)].symbol().to_string())
             .collect::<String>()
@@ -1388,7 +1448,9 @@ mod tests {
 
     fn render_to_string(width: u16, rows: &[RunnerRow]) -> String {
         let palette = Palette::for_flavor(Flavor::Mocha);
-        let mut term = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        // Height 10 clears the boxed-layout floor so the single runner row and
+        // the memory box both render (see runner_cell).
+        let mut term = Terminal::new(TestBackend::new(width, 10)).unwrap();
         term.draw(|f| {
             render(
                 f,
@@ -1451,7 +1513,7 @@ mod tests {
         )];
         let width = 64;
         let palette = Palette::for_flavor(Flavor::Mocha);
-        let mut term = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(width, 10)).unwrap();
         term.draw(|f| {
             render(
                 f,
@@ -1474,9 +1536,11 @@ mod tests {
         })
         .unwrap();
         let buf = term.backend().buffer().clone();
-        // No banner: title y=0, header y=1, first data row y=2.
-        let data_y = 2;
-        let cols = column_layout(Rect::new(0, 0, width, 1), runner_col_width(&rows));
+        // title y=0, runners box top border y=1, header y=2, first data row y=3.
+        let data_y = 3;
+        // Columns are laid out inside the runners box, inset 2 cols each side
+        // (border + padding).
+        let cols = column_layout(Rect::new(2, 0, width - 4, 1), runner_col_width(&rows));
         // job (12 wide) and branch (8 wide) are both narrower than their content,
         // so the ellipsis must be the trailing glyph at each column's last cell.
         let job_last_x = cols[JOB_IDX].x + cols[JOB_IDX].width - 1;
@@ -1757,6 +1821,14 @@ mod tests {
             content.contains("+2 more"),
             "overflow line should show +2 more"
         );
+        // No runner table here (rows empty), so `workflow › job` can only come
+        // from the hosted section's relabeled first header — proving the label
+        // moved out of the first column into the box title.
+        assert!(content.contains("hosted"), "hosted box title should render");
+        assert!(
+            content.contains("workflow \u{203a} job"),
+            "hosted first header should be relabeled to workflow \u{203a} job"
+        );
     }
 
     #[test]
@@ -1806,6 +1878,60 @@ mod tests {
         assert!(
             !content.contains("100h0m"),
             "full wait must not render intact past the column width"
+        );
+    }
+
+    #[test]
+    fn hosted_header_ellipsizes_on_a_narrow_terminal() {
+        // On a narrow terminal the `workflow › job` column bottoms out at its
+        // Min(12) floor, below the 14-col header. The header must truncate with
+        // an ellipsis (like the data cells) rather than hard-clip.
+        let now = SystemTime::now();
+        let hosted = vec![HostedJob {
+            repo: "o/r".into(),
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-latest".into(),
+            branch: "main".into(),
+            status: HostedStatus::InProgress,
+            since: now - std::time::Duration::from_secs(30),
+        }];
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(52, 12)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &[],
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: 0,
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                    multi_repo: false,
+                    deployments: &[],
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        // `workflow` only comes from the header, so its presence proves the header
+        // rendered…
+        assert!(content.contains("workflow"), "hosted header should render");
+        // …while the absence of the full 14-col label proves it was ellipsized
+        // rather than rendered intact (or hard-clipped mid-word without a marker).
+        assert!(
+            !content.contains("workflow \u{203a} job"),
+            "narrow header must truncate, not render the full 14-col label"
+        );
+        assert!(
+            content.contains('\u{2026}'),
+            "truncation ellipsis should appear"
         );
     }
 
@@ -1978,7 +2104,13 @@ mod tests {
             content.contains("queued"),
             "queued elapsed cell should render"
         );
-        assert!(content.contains("vercel"), "vercel header should render");
+        // The section name now lives in the box title; the first column header
+        // reads `project`.
+        assert!(content.contains("vercel"), "vercel box title should render");
+        assert!(
+            content.contains("project"),
+            "project column header should render"
+        );
         assert!(
             content.contains("feat: add pulse widget"),
             "commit summary column should render"
@@ -2020,5 +2152,59 @@ mod tests {
         );
         // 8 deployments, VERCEL_CAP=6 shown → 2 collapse into the overflow line.
         assert!(content.contains("+2 more"));
+    }
+
+    #[test]
+    fn every_section_renders_as_a_titled_rounded_box() {
+        // Runners, hosted, vercel, and the memory gauge all present: each is a
+        // rounded box carrying its name in the border.
+        let now = SystemTime::now();
+        let rows = vec![busy_row("ci-runner-1", "CI", "test", "main", 30)];
+        let hosted = vec![HostedJob {
+            repo: "o/r".into(),
+            workflow: "CI".into(),
+            job: "Lint".into(),
+            label: "ubuntu-latest".into(),
+            branch: "main".into(),
+            status: HostedStatus::InProgress,
+            since: now - std::time::Duration::from_secs(30),
+        }];
+        let deployments = vec![deployment("pulse", DeployStatus::Building, 30, now)];
+        let palette = Palette::for_flavor(Flavor::Mocha);
+        let mut term = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                &View {
+                    rows: &rows,
+                    slice_cap_bytes: 24 * 1024 * 1024 * 1024,
+                    now,
+                    status: None,
+                    palette: &palette,
+                    prefix: "ci-runner-",
+                    matched_seen: rows.len(),
+                    unmatched_seen: 0,
+                    warn_ratio: 0.85,
+                    crit_ratio: 0.90,
+                    hosted: &hosted,
+                    multi_repo: false,
+                    deployments: &deployments,
+                },
+            );
+        })
+        .unwrap();
+        let content = text(&term);
+        // Rounded corners are drawn (top-left ╭).
+        assert!(
+            content.contains('\u{256d}'),
+            "rounded box corner should render"
+        );
+        // Every section's name appears as its box title.
+        assert!(content.contains("runners"), "runners box title");
+        assert!(content.contains("hosted"), "hosted box title");
+        assert!(content.contains("vercel"), "vercel box title");
+        assert!(content.contains("memory"), "memory box title");
+        // `project` is unique to the vercel section's relabeled first header.
+        assert!(content.contains("project"), "vercel first header relabeled");
     }
 }
