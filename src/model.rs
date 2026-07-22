@@ -173,6 +173,20 @@ pub fn runner_index(name: &str) -> Option<u32> {
     name.rsplit('-').next()?.parse().ok()
 }
 
+/// Docker sort key: fleet prefix (the name with its trailing `-N` stripped)
+/// then the numeric index within that fleet. Names without a trailing numeric
+/// index sort last, by full name (`u32::MAX`). Sorting by this tuple groups
+/// each fleet together and keeps `runner-2` before `runner-10` within a fleet.
+fn docker_sort_key(name: &str) -> (&str, u32) {
+    match name.rsplit_once('-') {
+        Some((prefix, tail)) => match tail.parse() {
+            Ok(idx) => (prefix, idx),
+            Err(_) => (name, u32::MAX),
+        },
+        None => (name, u32::MAX),
+    }
+}
+
 pub fn elapsed_secs(started: SystemTime, now: SystemTime) -> u64 {
     now.duration_since(started)
         .map(|d| d.as_secs())
@@ -200,7 +214,8 @@ fn kind_order(k: SourceKind) -> u8 {
 /// workflow › job detail, `None` is busy-without-detail (org runners). Critical
 /// memory escalates the whole row to `NearCap` (overriding Busy); the Warn tier
 /// lives on the mem-cell channel via `mem_level`. Rows sort docker-first (by
-/// trailing index), then native (by display name). History is keyed by name.
+/// fleet prefix, then numeric index), then native (by display name). History is
+/// keyed by name.
 pub fn join(
     resources: Vec<RunnerResource>,
     jobs: &HashMap<RunnerKey, Option<JobInfo>>,
@@ -242,11 +257,10 @@ pub fn join(
         .collect();
     rows.sort_by(|a, b| {
         kind_order(a.kind).cmp(&kind_order(b.kind)).then_with(|| {
-            // Same kind here; docker orders by trailing index, native by name.
+            // Same kind here; docker orders by fleet prefix then numeric index,
+            // native by name.
             match a.kind {
-                SourceKind::Docker => runner_index(&a.name)
-                    .unwrap_or(u32::MAX)
-                    .cmp(&runner_index(&b.name).unwrap_or(u32::MAX)),
+                SourceKind::Docker => docker_sort_key(&a.name).cmp(&docker_sort_key(&b.name)),
                 SourceKind::Native => a.name.cmp(&b.name),
             }
         })
@@ -465,6 +479,35 @@ mod tests {
         );
         // Gauge sums docker rows only (100 + 300), ignoring native mem.
         assert_eq!(slice_total_bytes(&rows), 400);
+    }
+
+    #[test]
+    fn rows_sorted_docker_by_fleet_then_index() {
+        // Two fleets sharing indices, supplied scrambled and index-interleaved.
+        // Old index-only sort would interleave the fleets (flowagent-1, pulse-1,
+        // flowagent-2, pulse-2); grouping by fleet prefix keeps each together.
+        let rows = join(
+            vec![
+                docker_res("pulse-ci-runner-2", 1),
+                docker_res("flowagent-ci-runner-1", 1),
+                docker_res("pulse-ci-runner-1", 1),
+                docker_res("flowagent-ci-runner-2", 1),
+            ],
+            &HashMap::new(),
+            &History::default(),
+            WARN,
+            CRIT,
+        );
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "flowagent-ci-runner-1",
+                "flowagent-ci-runner-2",
+                "pulse-ci-runner-1",
+                "pulse-ci-runner-2",
+            ]
+        );
     }
 
     #[test]
