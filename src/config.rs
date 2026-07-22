@@ -5,10 +5,21 @@ use std::path::PathBuf;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
+/// One runner container-name prefix and the repo its jobs live under. `repo`
+/// is `None` for an unmapped prefix — the docker collector then tags matching
+/// runners with `key: None` (they render idle; no job lookup), so two unmapped
+/// fleets can never collide on a shared scope. The first rule additionally
+/// inherits the first configured repo at resolve time for backward compat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrefixRule {
+    pub prefix: String,
+    pub repo: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub socket_path: String,
-    pub prefix: String,
+    pub prefixes: Vec<PrefixRule>,
     pub slice_cap_bytes: u64,
     pub flavor: Flavor,
     pub warn_ratio: f64,
@@ -56,6 +67,28 @@ enum RepoField {
     Many(Vec<String>),
 }
 
+/// One table entry in an array-form `prefix` key: the container-name prefix and
+/// an optional repo its jobs live under. `match` is required (a missing one is a
+/// hard parse error); unknown keys are rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrefixEntry {
+    #[serde(rename = "match")]
+    prefix: String,
+    repo: Option<String>,
+}
+
+/// The TOML `prefix` key accepts either a single prefix string (unmapped) or an
+/// array of `{ match, repo }` tables. Untagged so both forms parse transparently.
+/// Array-of-strings and mixed forms are intentionally unsupported — a second
+/// unmapped prefix is written as `{ match = "..." }` with `repo` omitted.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PrefixField {
+    One(String),
+    Many(Vec<PrefixEntry>),
+}
+
 /// Optional settings parsed from the TOML config file. Every field is optional:
 /// a missing field falls through to the matching env var (which overrides the
 /// file) or the built-in default. Unknown keys are rejected so typos surface
@@ -65,7 +98,7 @@ enum RepoField {
 struct FileConfig {
     socket: Option<String>,
     repo: Option<RepoField>,
-    prefix: Option<String>,
+    prefix: Option<PrefixField>,
     slice_cap_gib: Option<u64>,
     theme: Option<String>,
 }
@@ -179,6 +212,82 @@ fn repo_field_to_vec(f: Option<RepoField>) -> Vec<String> {
     }
 }
 
+/// Parse one `PITWALL_PREFIX` entry: `"prefix"` or `"prefix=owner/repo"`. The
+/// prefix is trimmed; a present, non-empty repo half maps the prefix, else it's
+/// unmapped. An empty prefix yields `None` (dropped by the caller).
+fn parse_env_prefix_entry(raw: &str) -> Option<PrefixRule> {
+    let (prefix, repo) = match raw.split_once('=') {
+        Some((p, r)) => (p.trim(), Some(r.trim())),
+        None => (raw.trim(), None),
+    };
+    if prefix.is_empty() {
+        return None;
+    }
+    Some(PrefixRule {
+        prefix: prefix.to_string(),
+        repo: repo.filter(|r| !r.is_empty()).map(String::from),
+    })
+}
+
+/// Flatten the `prefix` source into rules. Env (comma-separated, each entry with
+/// an optional `=owner/repo` suffix) wins over the file's string-or-table form.
+/// An empty result falls back to the single built-in default prefix.
+fn resolve_prefixes(env_val: Option<String>, file: Option<PrefixField>) -> Vec<PrefixRule> {
+    let mut rules: Vec<PrefixRule> = match env_val {
+        Some(v) => v.split(',').filter_map(parse_env_prefix_entry).collect(),
+        None => match file {
+            Some(PrefixField::One(s)) if !s.trim().is_empty() => vec![PrefixRule {
+                prefix: s.trim().to_string(),
+                repo: None,
+            }],
+            Some(PrefixField::One(_)) | None => Vec::new(),
+            Some(PrefixField::Many(v)) => v
+                .into_iter()
+                .filter(|e| !e.prefix.trim().is_empty())
+                .map(|e| PrefixRule {
+                    prefix: e.prefix.trim().to_string(),
+                    repo: e
+                        .repo
+                        .filter(|r| !r.trim().is_empty())
+                        .map(|r| r.trim().to_string()),
+                })
+                .collect(),
+        },
+    };
+    if rules.is_empty() {
+        rules.push(PrefixRule {
+            prefix: "ci-runner-".into(),
+            repo: None,
+        });
+    }
+    rules
+}
+
+/// Preserve today's single-prefix behavior: the first rule, when unmapped,
+/// inherits the first configured repo so its docker runners still resolve job
+/// detail. Every *other* unmapped rule stays `None` (idle) so two unmapped
+/// fleets can't share a scope. No-op when the first rule is already mapped or no
+/// repo is configured.
+fn fold_implicit_first_repo(rules: &mut [PrefixRule], configured_repos: &[String]) {
+    if let Some(first) = rules.first_mut() {
+        if first.repo.is_none() {
+            if let Some(repo) = configured_repos.first() {
+                first.repo = Some(repo.clone());
+            }
+        }
+    }
+}
+
+/// Repos to poll for job detail: the user's configured repos plus every rule's
+/// mapped repo, order-preserving and deduplicated. Feeds `derive_scopes`;
+/// `configured_repos` itself is left untouched so the collector never invents a
+/// scope from a mapping.
+pub fn prefix_poll_seed(configured_repos: &[String], prefixes: &[PrefixRule]) -> Vec<String> {
+    let mut seed: Vec<String> = configured_repos.to_vec();
+    seed.extend(prefixes.iter().filter_map(|r| r.repo.clone()));
+    dedup_preserve(seed)
+}
+
 /// Layer the file config under the environment: for each key an env var (when
 /// set to a usable value) wins, else the file value, else the built-in default.
 /// `socket` additionally consults `DOCKER_HOST` between the file value and the
@@ -196,9 +305,8 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
         None => dedup_preserve(repo_field_to_vec(file.repo)),
     };
 
-    let prefix = env_nonempty(get, "PITWALL_PREFIX")
-        .or(file.prefix)
-        .unwrap_or_else(|| "ci-runner-".into());
+    let mut prefixes = resolve_prefixes(env_nonempty(get, "PITWALL_PREFIX"), file.prefix);
+    fold_implicit_first_repo(&mut prefixes, &configured_repos);
 
     let cap_gib = env_nonempty(get, "PITWALL_SLICE_CAP_GIB")
         .and_then(|s| s.parse::<u64>().ok())
@@ -224,7 +332,7 @@ fn resolve(file: FileConfig, get: &dyn Fn(&str) -> Option<String>) -> Config {
         orgs: vec![],
         socket_path,
         configured_repos,
-        prefix,
+        prefixes,
         slice_cap_bytes: cap_gib.saturating_mul(GIB),
         flavor,
         warn_ratio,
@@ -356,13 +464,159 @@ mod tests {
         assert_eq!(c.configured_repos, vec!["a/b", "c/d"]);
     }
 
+    // ---- prefixes --------------------------------------------------------
+
+    fn rule(prefix: &str, repo: Option<&str>) -> PrefixRule {
+        PrefixRule {
+            prefix: prefix.into(),
+            repo: repo.map(String::from),
+        }
+    }
+
+    #[test]
+    fn parse_env_prefix_entry_maps_and_trims() {
+        assert_eq!(
+            parse_env_prefix_entry("  pulse- = a/b "),
+            Some(rule("pulse-", Some("a/b")))
+        );
+        assert_eq!(parse_env_prefix_entry("pulse-"), Some(rule("pulse-", None)));
+        // Empty repo half is treated as unmapped.
+        assert_eq!(
+            parse_env_prefix_entry("pulse-="),
+            Some(rule("pulse-", None))
+        );
+        // Empty prefix is dropped.
+        assert_eq!(parse_env_prefix_entry("  "), None);
+        assert_eq!(parse_env_prefix_entry("=a/b"), None);
+    }
+
+    #[test]
+    fn resolve_env_prefix_multi_with_mapping() {
+        let c = resolve(
+            FileConfig::default(),
+            &env(&[(
+                "PITWALL_PREFIX",
+                "pulse-ci-runner-=erwins-enkel/pulse,flowagent-ci-runner-=ltdovr/flowagent",
+            )]),
+        );
+        assert_eq!(
+            c.prefixes,
+            vec![
+                rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+                rule("flowagent-ci-runner-", Some("ltdovr/flowagent")),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_toml_prefix_table_form() {
+        let file = FileConfig {
+            prefix: Some(PrefixField::Many(vec![
+                PrefixEntry {
+                    prefix: "pulse-ci-runner-".into(),
+                    repo: Some("erwins-enkel/pulse".into()),
+                },
+                PrefixEntry {
+                    prefix: "flowagent-ci-runner-".into(),
+                    repo: Some("ltdovr/flowagent".into()),
+                },
+            ])),
+            ..Default::default()
+        };
+        let c = resolve(file, &env(&[]));
+        assert_eq!(
+            c.prefixes,
+            vec![
+                rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+                rule("flowagent-ci-runner-", Some("ltdovr/flowagent")),
+            ]
+        );
+    }
+
+    #[test]
+    fn fold_implicit_first_repo_only_first_unmapped_rule() {
+        // Two unmapped prefixes + one configured repo: ONLY the first inherits
+        // it; the second stays None so the two fleets can't share a scope.
+        let mut rules = vec![
+            rule("pulse-ci-runner-", None),
+            rule("flowagent-ci-runner-", None),
+        ];
+        fold_implicit_first_repo(&mut rules, &["erwins-enkel/pulse".to_string()]);
+        assert_eq!(
+            rules,
+            vec![
+                rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+                rule("flowagent-ci-runner-", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn fold_implicit_first_repo_noop_when_first_mapped_or_no_repo() {
+        // Already-mapped first rule is untouched.
+        let mut mapped = vec![rule("pulse-", Some("a/b"))];
+        fold_implicit_first_repo(&mut mapped, &["c/d".to_string()]);
+        assert_eq!(mapped, vec![rule("pulse-", Some("a/b"))]);
+        // No configured repo → stays unmapped.
+        let mut unmapped = vec![rule("pulse-", None)];
+        fold_implicit_first_repo(&mut unmapped, &[]);
+        assert_eq!(unmapped, vec![rule("pulse-", None)]);
+    }
+
+    #[test]
+    fn resolve_two_unmapped_prefixes_folds_first_only() {
+        let file = FileConfig {
+            repo: Some(RepoField::One("erwins-enkel/pulse".into())),
+            prefix: Some(PrefixField::Many(vec![
+                PrefixEntry {
+                    prefix: "pulse-ci-runner-".into(),
+                    repo: None,
+                },
+                PrefixEntry {
+                    prefix: "flowagent-ci-runner-".into(),
+                    repo: None,
+                },
+            ])),
+            ..Default::default()
+        };
+        let c = resolve(file, &env(&[]));
+        assert_eq!(
+            c.prefixes,
+            vec![
+                rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+                rule("flowagent-ci-runner-", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn prefix_poll_seed_merges_mapped_repos_deduped() {
+        let configured = vec!["erwins-enkel/pulse".to_string()];
+        let prefixes = vec![
+            rule("pulse-ci-runner-", Some("erwins-enkel/pulse")), // dup of configured
+            rule("flowagent-ci-runner-", Some("ltdovr/flowagent")),
+            rule("misc-", None),
+        ];
+        assert_eq!(
+            prefix_poll_seed(&configured, &prefixes),
+            vec!["erwins-enkel/pulse", "ltdovr/flowagent"]
+        );
+    }
+
     // ---- resolve() -------------------------------------------------------
 
     #[test]
     fn defaults_when_env_and_file_empty() {
         let c = resolve(FileConfig::default(), &env(&[]));
         assert!(c.configured_repos.is_empty());
-        assert_eq!(c.prefix, "ci-runner-");
+        // No repo configured → default prefix stays unmapped.
+        assert_eq!(
+            c.prefixes,
+            vec![PrefixRule {
+                prefix: "ci-runner-".into(),
+                repo: None
+            }]
+        );
         assert_eq!(c.slice_cap_bytes, 24 * GIB);
         assert_eq!(c.socket_path, default_socket_path());
         assert_eq!(c.flavor, Flavor::Mocha);
@@ -373,14 +627,21 @@ mod tests {
         let file = FileConfig {
             socket: Some("/file.sock".into()),
             repo: Some(RepoField::One("o/r".into())),
-            prefix: Some("px-".into()),
+            prefix: Some(PrefixField::One("px-".into())),
             slice_cap_gib: Some(8),
             theme: Some("latte".into()),
         };
         let c = resolve(file, &env(&[]));
         assert_eq!(c.socket_path, "/file.sock");
         assert_eq!(c.configured_repos, vec!["o/r"]);
-        assert_eq!(c.prefix, "px-");
+        // First (only) prefix inherits the configured repo.
+        assert_eq!(
+            c.prefixes,
+            vec![PrefixRule {
+                prefix: "px-".into(),
+                repo: Some("o/r".into())
+            }]
+        );
         assert_eq!(c.slice_cap_bytes, 8 * GIB);
         // File `theme` is honored when the env var is unset.
         assert_eq!(c.flavor, Flavor::Latte);
@@ -391,7 +652,7 @@ mod tests {
         let file = FileConfig {
             socket: Some("/file.sock".into()),
             repo: Some(RepoField::One("file/repo".into())),
-            prefix: Some("file-".into()),
+            prefix: Some(PrefixField::One("file-".into())),
             slice_cap_gib: Some(8),
             theme: Some("latte".into()),
         };
@@ -407,7 +668,14 @@ mod tests {
         );
         assert_eq!(c.socket_path, "/env.sock");
         assert_eq!(c.configured_repos, vec!["env/repo"]);
-        assert_eq!(c.prefix, "env-");
+        // Env prefix wins over the file's; first prefix inherits the env repo.
+        assert_eq!(
+            c.prefixes,
+            vec![PrefixRule {
+                prefix: "env-".into(),
+                repo: Some("env/repo".into())
+            }]
+        );
         assert_eq!(c.slice_cap_bytes, 16 * GIB);
         assert_eq!(c.flavor, Flavor::Frappe);
     }
@@ -557,6 +825,37 @@ mod tests {
     fn load_unknown_key_is_error() {
         let p = temp_path("unknown-key.toml");
         std::fs::write(&p, "bogus = true\n").unwrap();
+        let res = load_file(ConfigPath::Explicit(p.clone()));
+        std::fs::remove_file(&p).unwrap();
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn load_toml_prefix_table_form_parses() {
+        let p = temp_path("prefix-table.toml");
+        std::fs::write(
+            &p,
+            "prefix = [{ match = \"pulse-ci-runner-\", repo = \"o/r\" }, { match = \"flowagent-ci-runner-\" }]\n",
+        )
+        .unwrap();
+        let cfg = load_file(ConfigPath::Explicit(p.clone())).unwrap().unwrap();
+        std::fs::remove_file(&p).unwrap();
+        match cfg.prefix {
+            Some(PrefixField::Many(v)) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0].prefix, "pulse-ci-runner-");
+                assert_eq!(v[0].repo.as_deref(), Some("o/r"));
+                assert_eq!(v[1].prefix, "flowagent-ci-runner-");
+                assert_eq!(v[1].repo, None);
+            }
+            other => panic!("expected Many, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_toml_prefix_table_missing_match_is_error() {
+        let p = temp_path("prefix-no-match.toml");
+        std::fs::write(&p, "prefix = [{ repo = \"o/r\" }]\n").unwrap();
         let res = load_file(ConfigPath::Explicit(p.clone()));
         std::fs::remove_file(&p).unwrap();
         assert!(res.is_err());

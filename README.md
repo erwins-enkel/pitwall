@@ -128,7 +128,7 @@ config file → built-in default**.
 |---|---|---|---|
 | socket | `PITWALL_SOCKET` | `socket` | `$DOCKER_HOST` (with `unix://` stripped) if set, else `/run/user/$UID/docker.sock` |
 | repo | `PITWALL_REPO` | `repo` | `owner/repo` (set this to your runners' repo; comma-separated string or array in TOML; all listed repos are polled for job detail and hosted jobs) |
-| prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` (must match your runner container names, e.g. `myorg-ci-runner-`) |
+| prefix | `PITWALL_PREFIX` | `prefix` | `ci-runner-` (must match your runner container names, e.g. `myorg-ci-runner-`; one or more prefixes, each optionally mapped to a repo — see [Multiple runner fleets](#multiple-runner-fleets)) |
 | slice cap (GiB) | `PITWALL_SLICE_CAP_GIB` | `slice_cap_gib` | `24` |
 | theme | `PITWALL_THEME` | `theme` | `mocha` — Catppuccin flavor: `mocha`, `macchiato`, `frappe`, or `latte` (light). Unknown values fall back to `mocha`. |
 | mem warn % | `PITWALL_MEM_WARN_PCT` | — | `85` (warn tier: yellow mem cell + memory sparkline label) |
@@ -167,15 +167,45 @@ Notes:
   file `socket` → `DOCKER_HOST` → `/run/user/$UID/docker.sock`. The file value
   intentionally overrides the ambient `DOCKER_HOST` env var, since it is
   deliberate pitwall configuration rather than an ambient docker setting.
-- **Docker runners tagged with first repo.** When configuring multiple repos,
-  Docker/prefix-matched runners are tagged with the **first configured repo**.
-  List the repo your Docker runners belong to first, or they won't match their
-  jobs and will show idle. Native runners are unaffected — they carry their own
-  repo scope from discovery.
+- **Prefix → repo mapping drives job detail.** A prefix's mapped repo (or, for an
+  unmapped first prefix, the first configured repo) is the scope its runners' jobs
+  are looked up under. See [Multiple runner fleets](#multiple-runner-fleets).
+  Native runners are unaffected — they carry their own repo scope from discovery.
 - A malformed file, or one with an unknown key, is a hard error: pitwall reports
   it and exits without starting the UI.
 - The default file is optional — its absence is fine. A `PITWALL_CONFIG` path
   that is set but missing is an error.
+
+### Multiple runner fleets
+
+`prefix` accepts more than one prefix so several runner fleets show at once. To
+get **job/branch detail** for a fleet, map its prefix to the repo its jobs live
+under. In TOML, use the table form (`{ match, repo }`); `repo` is optional:
+
+```toml
+prefix = [
+  { match = "pulse-ci-runner-",     repo = "erwins-enkel/pulse" },
+  { match = "flowagent-ci-runner-", repo = "ltdovr/flowagent" },
+]
+```
+
+Via the env var, comma-separate the prefixes and append `=owner/repo` to map one:
+
+```sh
+PITWALL_PREFIX="pulse-ci-runner-=erwins-enkel/pulse,flowagent-ci-runner-=ltdovr/flowagent"
+```
+
+Rules:
+
+- **Mapped prefix** → its runners resolve jobs under that repo (auto-added to the
+  poll list). A single string `prefix = "ci-runner-"` keeps today's behavior: it's
+  the first prefix and inherits your first configured `repo`.
+- **Unmapped extra prefix** → its runners show CPU/mem but always render **idle**
+  (no repo to look jobs up under). Only the *first* prefix inherits the first
+  configured repo; map any additional fleet explicitly to get its job detail.
+- **Shared memory gauge.** The docker memory gauge (`slice_cap_gib`) sums **all**
+  matched runners across every prefix, so with multiple fleets it reflects their
+  combined usage under one cap, not a single fleet's slice.
 
 ## How it works
 
