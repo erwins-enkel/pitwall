@@ -25,8 +25,9 @@ pub struct RunnerResource {
     pub cpu_pct: f64,
     pub mem_bytes: u64,
     pub mem_limit: u64,
-    /// `None` when the runner's GitHub identity is unknown (e.g. an unreadable
-    /// `.runner`); such rows show resources but never match a job (always idle).
+    /// `None` when the runner's GitHub identity is unknown (an unreadable
+    /// `.runner`, or a docker container matched by an unmapped prefix); such rows
+    /// show resources but never match a job (always idle).
     pub key: Option<RunnerKey>,
     pub kind: SourceKind,
 }

@@ -54,13 +54,21 @@ impl AppState {
 pub async fn run(mut terminal: ratatui::DefaultTerminal, mut cfg: Config) -> anyhow::Result<()> {
     let slice_cap_bytes = cfg.slice_cap_bytes;
     let palette = Palette::for_flavor(cfg.flavor);
-    let prefix = cfg.prefix.clone();
+    // Comma-joined prefixes for the empty-state hint (docker-only concept).
+    let prefix = cfg
+        .prefixes
+        .iter()
+        .map(|r| r.prefix.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     let warn_ratio = cfg.warn_ratio;
     let crit_ratio = cfg.crit_ratio;
 
-    // Discover native runners once; derive the jobs poll-lists from their scopes.
+    // Discover native runners once; derive the jobs poll-lists from their scopes
+    // plus any per-prefix mapped repos (so mapped docker fleets are polled too).
     let natives = discover();
-    let (repos, orgs) = resource_native::derive_scopes(&cfg.configured_repos, &natives);
+    let poll_seed = crate::config::prefix_poll_seed(&cfg.configured_repos, &cfg.prefixes);
+    let (repos, orgs) = resource_native::derive_scopes(&poll_seed, &natives);
     cfg.repos = repos;
     cfg.orgs = orgs;
     // Gate the hosted `repo` column: only repo scopes can surface hosted jobs, so

@@ -21,6 +21,17 @@ repo = "your-org/your-repo"
 # Runner container-name prefix to match (e.g. "pulse-ci-runner-"). Default below.
 # prefix = "ci-runner-"
 
+# Multiple fleets: prefix may be an array of { match, repo } tables. A mapped repo
+# resolves that fleet's job/branch detail (and is auto-added to the poll list). The
+# first prefix inherits the first configured `repo` when its `repo` is omitted; any
+# other unmapped fleet shows CPU/mem but stays idle. The docker memory gauge sums
+# ALL matched fleets under one slice_cap_gib.
+# prefix = [
+#   { match = "pulse-ci-runner-",     repo = "your-org/your-repo" },
+#   { match = "flowagent-ci-runner-", repo = "your-org/another-repo" },
+# ]
+# Env equivalent: PITWALL_PREFIX="pulse-ci-runner-=your-org/your-repo,flowagent-ci-runner-=your-org/another-repo"
+
 # Docker (pulse-slice) memory gauge cap, in GiB. Default below.
 # slice_cap_gib = 24
 

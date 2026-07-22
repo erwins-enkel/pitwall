@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, PrefixRule};
 use crate::model::{runner_index, RunnerKey, RunnerResource, SourceKind};
 use crate::resource::ResourceUpdate;
 use crate::stats_math::{cpu_pct, mem_used};
@@ -15,8 +15,11 @@ pub struct CpuSample {
     pub system: u64,
 }
 
-pub fn container_matches(name: &str, prefix: &str) -> bool {
-    name.trim_start_matches('/').starts_with(prefix)
+/// The first rule (config order) whose prefix matches the container name
+/// (leading `/` trimmed), or `None` when no rule matches.
+pub fn matching_rule<'a>(name: &str, rules: &'a [PrefixRule]) -> Option<&'a PrefixRule> {
+    let trimmed = name.trim_start_matches('/');
+    rules.iter().find(|r| trimmed.starts_with(&r.prefix))
 }
 
 pub fn cpu_from_samples(prev: Option<CpuSample>, cur: CpuSample, online: u64) -> f64 {
@@ -60,15 +63,7 @@ pub async fn run(cfg: Config, tx: mpsc::Sender<ResourceUpdate>) {
             }
         }
         let d = docker.as_ref().unwrap();
-        // Docker-collected runners are tagged with the first configured repo, same
-        // as the pre-multi-repo single-`repo` behavior. Scoping Docker containers
-        // to a specific one of several configured repos is out of scope here.
-        let scope_repo = cfg
-            .configured_repos
-            .first()
-            .map(String::as_str)
-            .unwrap_or("");
-        match collect(d, scope_repo, &cfg.prefix, &mut prev).await {
+        match collect(d, &cfg.prefixes, &mut prev).await {
             Ok((resources, matched_seen, unmatched_seen)) => {
                 let _ = tx
                     .send(ResourceUpdate {
@@ -101,8 +96,7 @@ fn err_update(msg: String) -> ResourceUpdate {
 
 async fn collect(
     d: &Docker,
-    repo: &str,
-    prefix: &str,
+    rules: &[PrefixRule],
     prev: &mut HashMap<String, CpuSample>,
 ) -> anyhow::Result<(Vec<RunnerResource>, usize, usize)> {
     let list = d
@@ -119,9 +113,10 @@ async fn collect(
             .and_then(|n| n.first())
             .cloned()
             .unwrap_or_default();
-        if !container_matches(&name, prefix) {
-            continue;
-        }
+        let repo = match matching_rule(&name, rules) {
+            Some(rule) => rule.repo.as_deref(),
+            None => continue,
+        };
         matched_seen += 1;
         let id = match &c.id {
             Some(id) => id.clone(),
@@ -150,10 +145,12 @@ async fn collect(
     Ok((out, matched_seen, total_seen - matched_seen))
 }
 
+/// `repo` is the matched rule's scope: `Some` maps the runner to a repo (job
+/// detail via `join`), `None` leaves `key: None` so the row always renders idle.
 fn to_resource(
     id: &str,
     name: &str,
-    repo: &str,
+    repo: Option<&str>,
     s: &bollard::models::ContainerStatsResponse,
     prev: &mut HashMap<String, CpuSample>,
 ) -> Option<RunnerResource> {
@@ -184,8 +181,8 @@ fn to_resource(
     let used = mem_used(mem.usage.unwrap_or(0), inactive);
     let display = name.trim_start_matches('/').to_string();
     Some(RunnerResource {
-        key: Some(RunnerKey {
-            scope: repo.to_string(),
+        key: repo.map(|scope| RunnerKey {
+            scope: scope.to_string(),
             name: docker_runner_name(&display),
         }),
         name: display,
@@ -200,11 +197,52 @@ fn to_resource(
 mod tests {
     use super::*;
 
+    fn rule(prefix: &str, repo: Option<&str>) -> PrefixRule {
+        PrefixRule {
+            prefix: prefix.into(),
+            repo: repo.map(String::from),
+        }
+    }
+
     #[test]
-    fn matches_prefix_ignoring_leading_slash() {
-        assert!(container_matches("/pulse-ci-runner-4", "pulse-ci-runner-"));
-        assert!(container_matches("pulse-ci-runner-1", "pulse-ci-runner-"));
-        assert!(!container_matches("other-thing", "pulse-ci-runner-"));
+    fn matching_rule_trims_leading_slash_and_first_match_wins() {
+        let rules = vec![
+            rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+            rule("pulse-", Some("other/repo")),
+        ];
+        // Leading `/` trimmed; the first rule that matches (config order) wins.
+        assert_eq!(
+            matching_rule("/pulse-ci-runner-4", &rules).map(|r| r.prefix.as_str()),
+            Some("pulse-ci-runner-")
+        );
+        assert!(matching_rule("other-thing", &rules).is_none());
+    }
+
+    #[test]
+    fn scope_selection_mapped_fleets_get_distinct_keys() {
+        // Each mapped fleet resolves to its own repo; runner-name derivation is
+        // identical (both -> runner-1) but the scope keeps the keys distinct.
+        let rules = vec![
+            rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+            rule("flowagent-ci-runner-", Some("ltdovr/flowagent")),
+        ];
+        let pulse = matching_rule("pulse-ci-runner-1", &rules).unwrap();
+        let flow = matching_rule("flowagent-ci-runner-1", &rules).unwrap();
+        assert_eq!(pulse.repo.as_deref(), Some("erwins-enkel/pulse"));
+        assert_eq!(flow.repo.as_deref(), Some("ltdovr/flowagent"));
+    }
+
+    #[test]
+    fn scope_selection_unmapped_second_fleet_yields_no_key() {
+        // Post-`resolve` state of two unmapped prefixes with one configured repo:
+        // only the first inherits it; the second stays None -> `key: None`, so it
+        // cannot inherit the first fleet's runner-1 job.
+        let rules = vec![
+            rule("pulse-ci-runner-", Some("erwins-enkel/pulse")),
+            rule("flowagent-ci-runner-", None),
+        ];
+        let flow = matching_rule("flowagent-ci-runner-1", &rules).unwrap();
+        assert_eq!(flow.repo, None);
     }
 
     #[test]
