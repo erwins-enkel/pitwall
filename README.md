@@ -214,3 +214,7 @@ Rules:
 - **Join** — by trailing runner index: container `ci-runner-N` matches GitHub runner name `runner-N`.
 - **Gotcha** — a running container with no in-progress job is normal idle state, not an error. The runners are ephemeral and deregister between jobs, so gaps between "container up" and "job assigned" are expected.
 - **Degradation** — a broken docker socket or `gh` failure surfaces as a red status banner and keeps the last-known-good data on screen instead of blanking the UI; the empty state is self-diagnosing (`waiting for runners…`, `waiting for runner stats…`, or `N containers running, none match prefix '…'`). No source failure panics; `q`/`Esc`/`Ctrl-C` always restore the terminal.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

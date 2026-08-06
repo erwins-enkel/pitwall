@@ -2,6 +2,7 @@
 name = "pitwall"
 version = "0.3.2"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
