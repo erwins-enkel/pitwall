@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.3.2...pitwall-v0.4.0) (2026-08-06)
+
+
+### Features
+
+* support multiple runner prefixes with per-prefix repo mapping ([#56](https://github.com/erwins-enkel/pitwall/issues/56)) ([d01f35f](https://github.com/erwins-enkel/pitwall/commit/d01f35f735ff9e32ee4c6af02b061998b536e5ca))
+
+
+### Bug Fixes
+
+* sort docker runners by fleet then numeric index ([#59](https://github.com/erwins-enkel/pitwall/issues/59)) ([0a0b52f](https://github.com/erwins-enkel/pitwall/commit/0a0b52f3236c4d33f91763b2b296c82ee0214ea3)), closes [#58](https://github.com/erwins-enkel/pitwall/issues/58)
+
 ## [0.3.2](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.3.1...pitwall-v0.3.2) (2026-07-05)
 
 
