@@ -2,9 +2,11 @@ use crate::config::Config;
 use crate::model::{sort_hosted, HostedJob, HostedStatus, JobInfo, RunnerKey};
 use futures_util::{stream, StreamExt};
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 
 /// Jobs keyed by scope-qualified [`RunnerKey`]. A present key means the runner
 /// is busy: `Some(JobInfo)` carries workflow › job detail (repo scopes),
@@ -217,15 +219,29 @@ fn flatten(per_scope: &HashMap<String, ScopeState>) -> (Slice, Vec<HostedJob>) {
     (slice, hosted)
 }
 
-async fn gh_api(path: &str) -> anyhow::Result<String> {
-    let out = Command::new("gh").arg("api").arg(path).output().await?;
+/// Upper bound on one `gh api` call. Unbounded, a single stalled request would
+/// block the whole poll cycle (every scope) until relaunch.
+const GH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Run `cmd` to completion within `limit`, returning stdout. On timeout the
+/// child is killed (`kill_on_drop`); stdin is detached from the TUI's pty.
+async fn run_bounded(mut cmd: Command, limit: Duration, what: &str) -> anyhow::Result<String> {
+    let out = timeout(limit, cmd.kill_on_drop(true).stdin(Stdio::null()).output())
+        .await
+        .map_err(|_| anyhow::anyhow!("{what} timed out"))??;
     if !out.status.success() {
         anyhow::bail!(
-            "gh api failed: {}",
+            "{what} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn gh_api(path: &str) -> anyhow::Result<String> {
+    let mut cmd = Command::new("gh");
+    cmd.arg("api").arg(path);
+    run_bounded(cmd, GH_TIMEOUT, &format!("gh api {path}")).await
 }
 
 async fn poll_repo(repo: &str) -> anyhow::Result<ScopeState> {
@@ -546,5 +562,27 @@ mod tests {
         assert_eq!(lint.status, HostedStatus::Queued);
         // queued → since == created_at (12:26:30Z)
         assert_eq!(lint.since, parse_rfc3339("2026-07-04T12:26:30Z"));
+    }
+
+    #[tokio::test]
+    async fn run_bounded_times_out_hung_command() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("10");
+        let t0 = std::time::Instant::now();
+        let err = run_bounded(cmd, Duration::from_millis(100), "sleep")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(t0.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn run_bounded_returns_stdout() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hi");
+        let out = run_bounded(cmd, Duration::from_secs(5), "echo")
+            .await
+            .unwrap();
+        assert_eq!(out, "hi\n");
     }
 }
