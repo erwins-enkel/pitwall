@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.4.0...pitwall-v0.4.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* time out hung gh api calls so job polling can't stall ([#88](https://github.com/erwins-enkel/pitwall/issues/88)) ([c240235](https://github.com/erwins-enkel/pitwall/commit/c240235dbf741b6f1a67c078d6dd70d9f7b24b87))
+
 ## [0.4.0](https://github.com/erwins-enkel/pitwall/compare/pitwall-v0.3.2...pitwall-v0.4.0) (2026-08-06)
 
 
