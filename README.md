@@ -114,10 +114,13 @@ cp target/release/pitwall ~/.local/bin/pitwall
 ## Usage
 
 ```sh
-pitwall
+pitwall            # launch the TUI
+pitwall --version  # or -V: print `pitwall <version>` and exit
+pitwall --help     # or -h: usage, quit keys, env vars, config path
 ```
 
-Quit with `q`, `Esc`, or `Ctrl-C` — the terminal is restored on exit.
+Quit with `q`, `Esc`, or `Ctrl-C` — the terminal is restored on exit. Any other
+argument prints an error to stderr and exits with status 2 without starting the UI.
 
 ## Configuration
 
